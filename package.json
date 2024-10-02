@@ -1,7 +1,7 @@
 {
-  "name": "temp-wasm-force-pkg",
-  "version": "0.1.12",
-  "description": "Temporary package for WebAssembly implementation of force directed graph",
+  "name": "d3-manybody-wasm",
+  "version": "0.1.0",
+  "description": "WebAssembly C++ implementation of D3's many-body, X and Y forces",
   "main": "src/js/index.js",
   "type": "module",
   "exports": {
@@ -12,16 +12,27 @@
     "src"
   ],
   "scripts": {
-    "build": "emcc --bind -o dist/d3-force-wasm.js src/cpp/force_xy.cpp src/cpp/force_many_body.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -O3",
-    "build:debug": "emcc --bind -o dist/d3-force-wasm-debug.js src/cpp/force_xy.cpp src/cpp/force_many_body.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -O0 -g4",
+    "build": "emcc --bind -o dist/d3-manybody-wasm.js src/cpp/force_many_body.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -O3",
+    "build:debug": "emcc --bind -o dist/d3-manybody-wasm-debug.js src/cpp/force_many_body.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -O0 -g4",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
+    "d3",
+    "d3-force",
     "wasm",
+    "webassembly",
+    "many-body",
     "force",
-    "graph",
-    "d3-force"
+    "graph"
   ],
   "author": "matoototo",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matoototo/d3-manybody-wasm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/matoototo/d3-manybody-wasm/issues"
+  },
+  "homepage": "https://github.com/matoototo/d3-manybody-wasm#readme"
 }
