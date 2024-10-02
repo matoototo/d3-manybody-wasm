@@ -220,15 +220,13 @@ public:
 
         std::sort(sortedIndices.begin(), sortedIndices.end());
 
-        // Reorder nodes and bodyData based on Morton code
-        emscripten::val newNodes = emscripten::val::array();
+        // Reorder bodyData based on Morton code
         std::vector<BodyData> newBodyData(n);
         for (int i = 0; i < n; ++i) {
             int oldIndex = sortedIndices[i].second;
-            newNodes.call<void>("push", nodes[oldIndex]);
             newBodyData[i] = bodyData[oldIndex];
         }
-        nodes = newNodes;
+
         bodyData = newBodyData;
 
         buildQuadtree();
@@ -241,7 +239,7 @@ public:
 
         // Sync data back to JavaScript
         for (int i = 0; i < n; ++i) {
-            emscripten::val node = nodes[i];
+            emscripten::val node = nodes[sortedIndices[i].second];
             node.set("vx", bodyData[i].vx);
             node.set("vy", bodyData[i].vy);
         }
