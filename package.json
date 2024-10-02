@@ -1,6 +1,6 @@
 {
   "name": "d3-manybody-wasm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "WebAssembly C++ implementation of D3's many-body, X and Y forces",
   "main": "src/js/index.js",
   "type": "module",
