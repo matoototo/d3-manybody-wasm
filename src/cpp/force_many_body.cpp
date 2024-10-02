@@ -3,6 +3,20 @@
 #include <functional>
 #include <cmath>
 #include <limits>
+#include <algorithm>
+
+// Function to calculate the Morton code (Z-order curve) for 2D coordinates
+unsigned int mortonCode(double x, double y, double x0, double y0, double s, unsigned int scaleFactor) {
+    unsigned int scaledX = static_cast<unsigned int>((x - x0) / s * scaleFactor);
+    unsigned int scaledY = static_cast<unsigned int>((y - y0) / s * scaleFactor);
+
+    unsigned int morton = 0;
+    for (unsigned int i = 0; i < sizeof(unsigned int) * 8 / 2; ++i) {
+        morton |= ((scaledX & (1 << i)) << i) | ((scaledY & (1 << i)) << (i + 1));
+    }
+
+    return morton;
+}
 
 class ForceManyBody {
 private:
@@ -11,44 +25,42 @@ private:
     std::function<double(const emscripten::val&, int, const emscripten::val&)> strength;
     double distanceMin2 = 1;
     double distanceMax2 = std::numeric_limits<double>::infinity();
-    double theta2 = 0.81;
+    double theta2 = 0.9;
     double alpha;
 
-    // Random number generator for jiggle
+    struct BodyData {
+        double x, y, vx, vy;
+    };
+    std::vector<BodyData> bodyData;
+
     std::function<double()> random;
 
-    // Quadtree node structure
     struct QuadtreeNode {
-        double x0, y0, x1, y1; // Bounds
-        double value = 0;      // Total strength
-        double x = 0, y = 0;   // Center of mass
-        QuadtreeNode* children[4] = { nullptr, nullptr, nullptr, nullptr };
-        emscripten::val data = emscripten::val::undefined(); // For leaf nodes
-        QuadtreeNode* next = nullptr; // For linked list of coincident nodes
+        double cx, cy;  // Center of the node
+        double s;       // Half-size of the region
+        double value = 0;  // Total mass
+        double x = 0, y = 0;  // Center of mass
+        int firstChild = -1;  // Index of first child, or -1 if leaf node
 
-        ~QuadtreeNode() {
-            for (int i = 0; i < 4; ++i) {
-                delete children[i];
-            }
-        }
+        QuadtreeNode(double cx_, double cy_, double s_) : cx(cx_), cy(cy_), s(s_) {}
     };
 
-    QuadtreeNode* quadtreeRoot = nullptr;
+    std::vector<QuadtreeNode> quadtreeNodes;
 
+    // Find bounding box of all nodes
     void findExtent(double& x0, double& y0, double& x1, double& y1) {
         int n = nodes["length"].as<int>();
         x0 = y0 = std::numeric_limits<double>::infinity();
         x1 = y1 = -std::numeric_limits<double>::infinity();
         for (int i = 0; i < n; ++i) {
-            emscripten::val node = nodes[i];
-            double xi = node["x"].as<double>();
-            double yi = node["y"].as<double>();
+            double xi = bodyData[i].x;
+            double yi = bodyData[i].y;
             if (xi < x0) x0 = xi;
             if (xi > x1) x1 = xi;
             if (yi < y0) y0 = yi;
             if (yi > y1) y1 = yi;
         }
-        // Expand the bounds slightly to avoid precision errors
+        // Slightly expand the bounds to avoid precision issues
         double dx = x1 - x0;
         double dy = y1 - y0;
         if (dx == 0) dx = 1;
@@ -59,174 +71,120 @@ private:
         y1 += dy * 0.1;
     }
 
-    void insertNode(QuadtreeNode* node, emscripten::val& dataNode) {
-        double x = dataNode["x"].as<double>();
-        double y = dataNode["y"].as<double>();
+    // Insert a node into the quadtree
+    void insertNode(int nodeIndex, int dataIndex) {
+        QuadtreeNode& node = quadtreeNodes[nodeIndex];
+        double x = bodyData[dataIndex].x;
+        double y = bodyData[dataIndex].y;
 
-        // Leaf node
-        if (node->data.isUndefined()) {
-            node->data = dataNode;
-            return;
+        // If it's a leaf node
+        if (node.firstChild < 0) {
+            if (node.value == 0) {
+                // First insertion
+                node.x = x;
+                node.y = y;
+                node.value = strengths[dataIndex];
+                return;
+            }
+            // Subdivide the node
+            subdivideNode(nodeIndex);
         }
 
-        // Internal node or leaf with data, need to split
-        if (node->children[0] == nullptr) {
-            // Subdivide node
-            subdivideNode(node);
-            // Re-insert existing data node
-            emscripten::val existingDataNode = node->data;
-            node->data = emscripten::val::undefined();
-            insertNode(node, existingDataNode);
-        }
-
-        // Determine which quadrant to insert the node into
-        int i = getQuadrant(node, x, y);
-        insertNode(node->children[i], dataNode);
+        // Determine the quadrant to insert into
+        int quadIndex = getQuadrant(node, x, y);
+        insertNode(node.firstChild + quadIndex, dataIndex);
     }
 
-    void subdivideNode(QuadtreeNode* node) {
-        double x0 = node->x0;
-        double y0 = node->y0;
-        double x1 = node->x1;
-        double y1 = node->y1;
-        double xm = (x0 + x1) / 2;
-        double ym = (y0 + y1) / 2;
+    // Subdivide a node into four quadrants
+    void subdivideNode(int nodeIndex) {
+        QuadtreeNode& node = quadtreeNodes[nodeIndex];
+        double halfSize = node.s / 2;
+        int firstChildIndex = quadtreeNodes.size();
+        node.firstChild = firstChildIndex;
 
-        node->children[0] = new QuadtreeNode(); // NW
-        node->children[0]->x0 = x0;
-        node->children[0]->y0 = y0;
-        node->children[0]->x1 = xm;
-        node->children[0]->y1 = ym;
-
-        node->children[1] = new QuadtreeNode(); // NE
-        node->children[1]->x0 = xm;
-        node->children[1]->y0 = y0;
-        node->children[1]->x1 = x1;
-        node->children[1]->y1 = ym;
-
-        node->children[2] = new QuadtreeNode(); // SW
-        node->children[2]->x0 = x0;
-        node->children[2]->y0 = ym;
-        node->children[2]->x1 = xm;
-        node->children[2]->y1 = y1;
-
-        node->children[3] = new QuadtreeNode(); // SE
-        node->children[3]->x0 = xm;
-        node->children[3]->y0 = ym;
-        node->children[3]->x1 = x1;
-        node->children[3]->y1 = y1;
+        // Create four children
+        quadtreeNodes.emplace_back(node.cx - halfSize, node.cy - halfSize, halfSize);  // Bottom-left
+        quadtreeNodes.emplace_back(node.cx + halfSize, node.cy - halfSize, halfSize);  // Bottom-right
+        quadtreeNodes.emplace_back(node.cx - halfSize, node.cy + halfSize, halfSize);  // Top-left
+        quadtreeNodes.emplace_back(node.cx + halfSize, node.cy + halfSize, halfSize);  // Top-right
     }
 
-    int getQuadrant(QuadtreeNode* node, double x, double y) {
-        double xm = (node->x0 + node->x1) / 2;
-        double ym = (node->y0 + node->y1) / 2;
-        return (y >= ym ? 2 : 0) + (x >= xm ? 1 : 0);
+    // Determine the quadrant of a point (x, y) relative to node's center
+    int getQuadrant(const QuadtreeNode& node, double x, double y) {
+        int quad = 0;
+        if (x >= node.cx) quad += 1;
+        if (y >= node.cy) quad += 2;
+        return quad;
     }
 
+    // Build the quadtree
     void buildQuadtree() {
         double x0, y0, x1, y1;
         findExtent(x0, y0, x1, y1);
-        quadtreeRoot = new QuadtreeNode();
-        quadtreeRoot->x0 = x0;
-        quadtreeRoot->y0 = y0;
-        quadtreeRoot->x1 = x1;
-        quadtreeRoot->y1 = y1;
+        double cx = (x0 + x1) / 2;
+        double cy = (y0 + y1) / 2;
+        double s = std::max(x1 - x0, y1 - y0) / 2 * 1.1;
+
+        quadtreeNodes.clear();
+        quadtreeNodes.emplace_back(cx, cy, s);
 
         int n = nodes["length"].as<int>();
         for (int i = 0; i < n; ++i) {
-            emscripten::val node = nodes[i];
-            insertNode(quadtreeRoot, node);
+            insertNode(0, i);
         }
-
-        accumulate(quadtreeRoot);
     }
 
-    void accumulate(QuadtreeNode* node) {
-        double strength = 0.0;
-        double x = 0.0, y = 0.0;
-        double weight = 0.0;
+    // Propagate masses and centers of mass upwards through the tree
+    void propagate() {
+        for (int i = quadtreeNodes.size() - 1; i >= 0; --i) {
+            QuadtreeNode& node = quadtreeNodes[i];
+            if (node.firstChild < 0) continue;
 
-        if (node->children[0] != nullptr) {
-            // Internal node
+            // Combine the masses and centers of the children
+            double mass = 0, x = 0, y = 0;
+            for (int j = 0; j < 4; ++j) {
+                QuadtreeNode& child = quadtreeNodes[node.firstChild + j];
+                mass += child.value;
+                x += child.x * child.value;
+                y += child.y * child.value;
+            }
+
+            if (mass > 0) {
+                node.x = x / mass;
+                node.y = y / mass;
+            }
+            node.value = mass;
+        }
+    }
+
+    // Apply forces from the quadtree to a node
+    void apply(int nodeIndex, BodyData& body) {
+        QuadtreeNode& quad = quadtreeNodes[nodeIndex];
+
+        if (quad.value == 0) return;
+
+        double dx = quad.x - body.x;
+        double dy = quad.y - body.y;
+        double w = quad.s * 2;
+        double d2 = dx * dx + dy * dy;
+
+        if (w * w / theta2 < d2) {
+            if (d2 < distanceMax2) {
+                if (d2 == 0) {
+                    dx = (random() - 0.5) * 1e-6;
+                    dy = (random() - 0.5) * 1e-6;
+                    d2 = dx * dx + dy * dy;
+                }
+                if (d2 < distanceMin2) d2 = distanceMin2;
+                double factor = quad.value * alpha / d2;
+                body.vx += dx * factor;
+                body.vy += dy * factor;
+            }
+        } else if (quad.firstChild >= 0) {
             for (int i = 0; i < 4; ++i) {
-                QuadtreeNode* child = node->children[i];
-                if (child) {
-                    accumulate(child);
-                    double c = std::abs(child->value);
-                    if (c > 0) {
-                        strength += child->value;
-                        weight += c;
-                        x += c * child->x;
-                        y += c * child->y;
-                    }
-                }
-            }
-            node->x = x / weight;
-            node->y = y / weight;
-        } else if (!node->data.isUndefined()) {
-            // Leaf node
-            node->x = node->data["x"].as<double>();
-            node->y = node->data["y"].as<double>();
-            int index = node->data["index"].as<int>();
-            strength += strengths[index];
-            // Handle coincident nodes if any
-            QuadtreeNode* q = node->next;
-            while (q) {
-                int idx = q->data["index"].as<int>();
-                strength += strengths[idx];
-                q = q->next;
+                apply(quad.firstChild + i, body);
             }
         }
-        node->value = strength;
-    }
-
-    void apply(QuadtreeNode* quad, emscripten::val& node) {
-        if (quad->value == 0) return;
-
-        double dx = quad->x - node["x"].as<double>();
-        double dy = quad->y - node["y"].as<double>();
-        double w = quad->x1 - quad->x0;
-        double l = dx * dx + dy * dy;
-
-        // Apply the Barnes-Hut approximation if possible.
-        if (w * w / theta2 < l) {
-            if (l < distanceMax2) {
-                if (dx == 0) dx = jiggle(), l += dx * dx;
-                if (dy == 0) dy = jiggle(), l += dy * dy;
-                if (l < distanceMin2) l = distanceMin2;
-                double factor = quad->value * alpha / l;
-                node.set("vx", node["vx"].as<double>() + dx * factor);
-                node.set("vy", node["vy"].as<double>() + dy * factor);
-            }
-        } else if (quad->children[0] != nullptr) {
-            // Internal node, recurse into children
-            for (int i = 0; i < 4; ++i) {
-                if (quad->children[i]) {
-                    apply(quad->children[i], node);
-                }
-            }
-        } else if (!quad->data.isUndefined() && l < distanceMax2) {
-            // Leaf node
-            if (quad->data != node || quad->next != nullptr) {
-                if (dx == 0) dx = jiggle(), l += dx * dx;
-                if (dy == 0) dy = jiggle(), l += dy * dy;
-                if (l < distanceMin2) l = distanceMin2;
-            }
-            QuadtreeNode* q = quad;
-            do {
-                if (q->data != node) {
-                    int index = q->data["index"].as<int>();
-                    double w = strengths[index] * alpha / l;
-                    node.set("vx", node["vx"].as<double>() + dx * w);
-                    node.set("vy", node["vy"].as<double>() + dy * w);
-                }
-                q = q->next;
-            } while (q != nullptr);
-        }
-    }
-
-    double jiggle() {
-        return (random() - 0.5) * 1e-6;
     }
 
 public:
@@ -237,15 +195,58 @@ public:
 
     void force(double alpha_) {
         alpha = alpha_;
-        buildQuadtree();
+
+        // Sync data from JavaScript to C++
         int n = nodes["length"].as<int>();
+        bodyData.resize(n);
         for (int i = 0; i < n; ++i) {
             emscripten::val node = nodes[i];
-            apply(quadtreeRoot, node);
+            bodyData[i].x = node["x"].as<double>();
+            bodyData[i].y = node["y"].as<double>();
+            bodyData[i].vx = node["vx"].as<double>();
+            bodyData[i].vy = node["vy"].as<double>();
         }
-        // Clean up
-        delete quadtreeRoot;
-        quadtreeRoot = nullptr;
+
+        // Calculate Morton codes and sort nodes
+        double x0, y0, x1, y1;
+        findExtent(x0, y0, x1, y1);
+        double s = std::max(x1 - x0, y1 - y0);
+        unsigned int scaleFactor = 65536;
+
+        std::vector<std::pair<unsigned int, int>> sortedIndices(n);
+        for (int i = 0; i < n; ++i) {
+            sortedIndices[i] = {mortonCode(bodyData[i].x, bodyData[i].y, x0, y0, s, scaleFactor), i};
+        }
+
+        std::sort(sortedIndices.begin(), sortedIndices.end());
+
+        // Reorder nodes and bodyData based on Morton code
+        emscripten::val newNodes = emscripten::val::array();
+        std::vector<BodyData> newBodyData(n);
+        for (int i = 0; i < n; ++i) {
+            int oldIndex = sortedIndices[i].second;
+            newNodes.call<void>("push", nodes[oldIndex]);
+            newBodyData[i] = bodyData[oldIndex];
+        }
+        nodes = newNodes;
+        bodyData = newBodyData;
+
+        buildQuadtree();
+        propagate();
+
+        // Apply forces using C++ data
+        for (int i = 0; i < n; ++i) {
+            apply(0, bodyData[i]);
+        }
+
+        // Sync data back to JavaScript
+        for (int i = 0; i < n; ++i) {
+            emscripten::val node = nodes[i];
+            node.set("vx", bodyData[i].vx);
+            node.set("vy", bodyData[i].vy);
+        }
+
+        quadtreeNodes.clear();
     }
 
     void initialize() {
@@ -260,6 +261,15 @@ public:
 
     void setNodes(const emscripten::val& _nodes) {
         nodes = _nodes;
+        int n = nodes["length"].as<int>();
+        bodyData.resize(n);
+        for (int i = 0; i < n; ++i) {
+            emscripten::val node = nodes[i];
+            bodyData[i].x = node["x"].as<double>();
+            bodyData[i].y = node["y"].as<double>();
+            bodyData[i].vx = node["vx"].as<double>();
+            bodyData[i].vy = node["vy"].as<double>();
+        }
         initialize();
     }
 
@@ -275,14 +285,6 @@ public:
 
     emscripten::val getStrength() const {
         return emscripten::val(strength);
-    }
-
-    void setRandom(const emscripten::val& _random) {
-        random = _random.as<std::function<double()>>();
-    }
-
-    emscripten::val getRandom() const {
-        return emscripten::val::global("Math")["random"];
     }
 
     void setDistanceMin(double d) {
@@ -328,9 +330,7 @@ EMSCRIPTEN_BINDINGS(force_many_body_module) {
         .function("setDistanceMax", &ForceManyBody::setDistanceMax)
         .function("getDistanceMax", &ForceManyBody::getDistanceMax)
         .function("setTheta", &ForceManyBody::setTheta)
-        .function("getTheta", &ForceManyBody::getTheta)
-        .function("setRandom", &ForceManyBody::setRandom)
-        .function("getRandom", &ForceManyBody::getRandom);
+        .function("getTheta", &ForceManyBody::getTheta);
 
     emscripten::function("createForceManyBody", &createForceManyBody, emscripten::allow_raw_pointers());
 }

@@ -1,6 +1,6 @@
 {
   "name": "temp-wasm-force-pkg",
-  "version": "0.1.6",
+  "version": "0.1.12",
   "description": "Temporary package for WebAssembly implementation of force directed graph",
   "main": "src/js/index.js",
   "type": "module",
@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "build": "emcc --bind -o dist/d3-force-wasm.js src/cpp/force_xy.cpp src/cpp/force_many_body.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -O3",
+    "build:debug": "emcc --bind -o dist/d3-force-wasm-debug.js src/cpp/force_xy.cpp src/cpp/force_many_body.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -O0 -g4",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
