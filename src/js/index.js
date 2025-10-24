@@ -1,4 +1,4 @@
-import createModule from '../../dist/d3-force-wasm.js';
+import createModule from '../../dist/d3-manybody-wasm.js';
 
 let moduleInstance = null;
 let initializationPromise = null;
