@@ -4,7 +4,7 @@ let moduleInstance = null;
 let initializationPromise = null;
 
 const STRIDE = 4;
-const BYTES_PER_VALUE = Float64Array.BYTES_PER_ELEMENT;
+const BYTES_PER_VALUE = Float32Array.BYTES_PER_ELEMENT;
 const nodeBufferRegistry = new WeakMap();
 
 function ensureModuleReady() {
@@ -20,10 +20,10 @@ function refreshEntryView(entry) {
     }
 
     const desiredLength = entry.count * STRIDE;
-    const heapBuffer = moduleInstance.HEAPF64.buffer;
+    const heapBuffer = moduleInstance.HEAPF32.buffer;
 
     if (!entry.view || entry.view.buffer !== heapBuffer || entry.view.length !== desiredLength) {
-        entry.view = new Float64Array(heapBuffer, entry.ptr, desiredLength);
+        entry.view = new Float32Array(heapBuffer, entry.ptr, desiredLength);
     }
 
     return entry.view;
@@ -34,7 +34,7 @@ function retainNodeBuffer(nodes, count) {
 
     let entry = nodeBufferRegistry.get(nodes);
     if (!entry) {
-        entry = { ptr: 0, capacity: 0, view: null, refCount: 0, count: 0 };
+        entry = { ptr: 0, capacity: 0, view: null, refCount: 0, count: 0, lastUploadAlpha: Number.NaN, lastDownloadAlpha: Number.NaN };
         nodeBufferRegistry.set(nodes, entry);
     }
 
@@ -55,6 +55,9 @@ function retainNodeBuffer(nodes, count) {
     entry.count = count;
     entry.refCount += 1;
     refreshEntryView(entry);
+    // Reset per-tick markers when (re)allocating/retaining
+    entry.lastUploadAlpha = Number.NaN;
+    entry.lastDownloadAlpha = Number.NaN;
     return entry;
 }
 
@@ -115,15 +118,17 @@ function createAxisForce(createForceFunc, coordinateName) {
         let bufferEntry = null;
         let bufferView = null;
 
-        const syncNodesToBuffer = () => {
+        const syncNodesToBuffer = (alpha) => {
             if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
+            if (bufferEntry.lastUploadAlpha === alpha) return;
             bufferEntry.count = nodeCount;
             bufferView = refreshEntryView(bufferEntry);
             if (!bufferView) return;
             writeNodesToBuffer(nodesRef, bufferView, nodeCount);
+            bufferEntry.lastUploadAlpha = alpha;
         };
 
-        const syncBufferToNodes = () => {
+        const syncBufferToNodes = (_alpha) => {
             if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
             bufferView = refreshEntryView(bufferEntry);
             if (!bufferView) return;
@@ -141,9 +146,9 @@ function createAxisForce(createForceFunc, coordinateName) {
 
         function forceWrapper(alpha) {
             if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-            syncNodesToBuffer();
+            syncNodesToBuffer(alpha);
             force.force(alpha);
-            syncBufferToNodes();
+            syncBufferToNodes(alpha);
         }
 
         forceWrapper.initialize = function (nodes) {
@@ -159,7 +164,8 @@ function createAxisForce(createForceFunc, coordinateName) {
                 bufferEntry = retainNodeBuffer(nodesRef, nodeCount);
                 if (bufferEntry.ptr) {
                     force.setNodeBuffer(bufferEntry.ptr, nodeCount);
-                    syncNodesToBuffer();
+                    bufferEntry.count = nodeCount;
+                    bufferView = refreshEntryView(bufferEntry);
                 }
             }
 
@@ -205,15 +211,17 @@ function createForceManyBody() {
     let bufferEntry = null;
     let bufferView = null;
 
-    const syncNodesToBuffer = () => {
+    const syncNodesToBuffer = (alpha) => {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
+        if (bufferEntry.lastUploadAlpha === alpha) return;
         bufferEntry.count = nodeCount;
         bufferView = refreshEntryView(bufferEntry);
         if (!bufferView) return;
         writeNodesToBuffer(nodesRef, bufferView, nodeCount);
+        bufferEntry.lastUploadAlpha = alpha;
     };
 
-    const syncBufferToNodes = () => {
+    const syncBufferToNodes = (_alpha) => {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
         bufferView = refreshEntryView(bufferEntry);
         if (!bufferView) return;
@@ -231,9 +239,9 @@ function createForceManyBody() {
 
     function forceWrapper(alpha) {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-        syncNodesToBuffer();
+        syncNodesToBuffer(alpha);
         force.force(alpha);
-        syncBufferToNodes();
+        syncBufferToNodes(alpha);
     }
 
     forceWrapper.initialize = function (nodes) {
@@ -249,7 +257,8 @@ function createForceManyBody() {
             bufferEntry = retainNodeBuffer(nodesRef, nodeCount);
             if (bufferEntry.ptr) {
                 force.setNodeBuffer(bufferEntry.ptr, nodeCount);
-                syncNodesToBuffer();
+                bufferEntry.count = nodeCount;
+                bufferView = refreshEntryView(bufferEntry);
             }
         } else {
             force.setNodeBuffer(0, 0);
@@ -314,15 +323,17 @@ function createForceCollide() {
     let radiusCapacity = 0;
     let radiusView = null;
 
-    const syncNodesToBuffer = () => {
+    const syncNodesToBuffer = (alpha) => {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
+        if (bufferEntry.lastUploadAlpha === alpha) return;
         bufferEntry.count = nodeCount;
         bufferView = refreshEntryView(bufferEntry);
         if (!bufferView) return;
         writeNodesToBuffer(nodesRef, bufferView, nodeCount);
+        bufferEntry.lastUploadAlpha = alpha;
     };
 
-    const syncBufferToNodes = () => {
+    const syncBufferToNodes = (_alpha) => {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
         bufferView = refreshEntryView(bufferEntry);
         if (!bufferView) return;
@@ -334,8 +345,8 @@ function createForceCollide() {
             radiusView = null;
             return null;
         }
-        if (!radiusView || radiusView.buffer !== moduleInstance.HEAPF64.buffer || radiusView.length !== length) {
-            radiusView = new Float64Array(moduleInstance.HEAPF64.buffer, radiusPtr, length);
+        if (!radiusView || radiusView.buffer !== moduleInstance.HEAPF32.buffer || radiusView.length !== length) {
+            radiusView = new Float32Array(moduleInstance.HEAPF32.buffer, radiusPtr, length);
         }
         return radiusView;
     };
@@ -391,9 +402,9 @@ function createForceCollide() {
 
     function forceWrapper(alpha) {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-        syncNodesToBuffer();
+        syncNodesToBuffer(alpha);
         force.force(alpha ?? 0);
-        syncBufferToNodes();
+        syncBufferToNodes(alpha);
     }
 
     forceWrapper.initialize = function (nodes) {
@@ -409,7 +420,8 @@ function createForceCollide() {
             bufferEntry = retainNodeBuffer(nodesRef, nodeCount);
             if (bufferEntry.ptr) {
                 force.setNodeBuffer(bufferEntry.ptr, nodeCount);
-                syncNodesToBuffer();
+                bufferEntry.count = nodeCount;
+                bufferView = refreshEntryView(bufferEntry);
             }
             if (radiusAccessor) {
                 populateRadiusBuffer();

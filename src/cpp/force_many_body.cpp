@@ -22,7 +22,7 @@ unsigned int mortonCode(double x, double y, double x0, double y0, double s, unsi
 class ForceManyBody {
 private:
     emscripten::val nodes;
-    std::vector<double> strengths;
+    std::vector<float> strengths;
     std::function<double(const emscripten::val&, int, const emscripten::val&)> strength;
     double distanceMin2 = 1;
     double distanceMax2 = std::numeric_limits<double>::infinity();
@@ -30,11 +30,11 @@ private:
     double alpha;
 
     struct BodyData {
-        double x, y, vx, vy;
+        float x, y, vx, vy;
     };
     std::vector<BodyData> bodyData;
 
-    double* nodeBuffer = nullptr;
+    float* nodeBuffer = nullptr;
     int nodeCount = 0;
     static constexpr int stride = 4;
 
@@ -180,8 +180,8 @@ private:
                 }
                 if (d2 < distanceMin2) d2 = distanceMin2;
                 double factor = quad.value * alpha / d2;
-                body.vx += dx * factor;
-                body.vy += dy * factor;
+                body.vx += static_cast<float>(dx * factor);
+                body.vy += static_cast<float>(dy * factor);
             }
         } else if (quad.firstChild >= 0) {
             for (int i = 0; i < 4; ++i) {
@@ -246,6 +246,7 @@ public:
         // Sync data back to JavaScript
         for (int i = 0; i < n; ++i) {
             int originalIndex = sortedIndices[i].second;
+            if (originalIndex < 0 || originalIndex >= nodeCount) continue;
             int offset = originalIndex * stride;
             nodeBuffer[offset + 2] = bodyData[i].vx;
             nodeBuffer[offset + 3] = bodyData[i].vy;
@@ -261,7 +262,7 @@ public:
         strengths.resize(n);
         for (int i = 0; i < n; ++i) {
             emscripten::val node = nodes[i];
-            strengths[i] = strength(node, i, nodes);
+            strengths[i] = static_cast<float>(strength(node, i, nodes));
         }
     }
 
@@ -274,7 +275,7 @@ public:
     }
 
     void setNodeBuffer(uintptr_t ptr, int count) {
-        nodeBuffer = reinterpret_cast<double*>(ptr);
+        nodeBuffer = reinterpret_cast<float*>(ptr);
         nodeCount = count;
     }
 
@@ -293,27 +294,27 @@ public:
     }
 
     void setDistanceMin(double d) {
-        distanceMin2 = d * d;
+        distanceMin2 = static_cast<float>(d * d);
     }
 
     double getDistanceMin() const {
-        return std::sqrt(distanceMin2);
+        return static_cast<double>(std::sqrt(distanceMin2));
     }
 
     void setDistanceMax(double d) {
-        distanceMax2 = d * d;
+        distanceMax2 = static_cast<float>(d * d);
     }
 
     double getDistanceMax() const {
-        return std::sqrt(distanceMax2);
+        return static_cast<double>(std::sqrt(distanceMax2));
     }
 
     void setTheta(double t) {
-        theta2 = t * t;
+        theta2 = static_cast<float>(t * t);
     }
 
     double getTheta() const {
-        return std::sqrt(theta2);
+        return static_cast<double>(std::sqrt(theta2));
     }
 };
 

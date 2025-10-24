@@ -8,10 +8,10 @@ class ForceXY {
 protected:
     std::function<double(const emscripten::val&, int, const emscripten::val&)> coordinate;
     std::function<double(const emscripten::val&, int, const emscripten::val&)> strength;
-    std::vector<double> strengths;
-    std::vector<double> coordz;
+    std::vector<float> strengths;
+    std::vector<float> coordz;
     emscripten::val nodes;
-    double* nodeBuffer = nullptr;
+    float* nodeBuffer = nullptr;
     int nodeCount = 0;
     static constexpr int stride = 4;
 
@@ -48,8 +48,10 @@ public:
         strengths.resize(n);
         coordz.resize(n);
         for (int i = 0; i < n; ++i) {
-            coordz[i] = coordinate(nodes[i], i, nodes);
-            strengths[i] = std::isnan(coordz[i]) ? 0 : strength(nodes[i], i, nodes);
+            double cval = coordinate(nodes[i], i, nodes);
+            double sval = strength(nodes[i], i, nodes);
+            coordz[i] = static_cast<float>(cval);
+            strengths[i] = std::isnan(cval) ? 0.0f : static_cast<float>(sval);
         }
     }
 
@@ -92,7 +94,7 @@ public:
     }
 
     void setNodeBuffer(uintptr_t ptr, int count) {
-        nodeBuffer = (ptr != 0 && count > 0) ? reinterpret_cast<double*>(ptr) : nullptr;
+        nodeBuffer = (ptr != 0 && count > 0) ? reinterpret_cast<float*>(ptr) : nullptr;
         nodeCount = count;
     }
 };
@@ -107,12 +109,12 @@ public:
 
     void updateNodeVelocityBuffer(int index, double alpha) override {
         if (nodeBuffer == nullptr) return;
-        double coord = coordz[index];
-        double strengthValue = strengths[index];
+        float coord = coordz[index];
+        float strengthValue = strengths[index];
         if (strengthValue == 0 || std::isnan(coord)) return;
         int offset = index * stride;
-        double currentX = nodeBuffer[offset];
-        double delta = (coord - currentX) * strengthValue * alpha;
+        float currentX = nodeBuffer[offset];
+        float delta = static_cast<float>((coord - currentX) * strengthValue * alpha);
         nodeBuffer[offset + 2] += delta;
     }
 };
@@ -127,12 +129,12 @@ public:
 
     void updateNodeVelocityBuffer(int index, double alpha) override {
         if (nodeBuffer == nullptr) return;
-        double coord = coordz[index];
-        double strengthValue = strengths[index];
+        float coord = coordz[index];
+        float strengthValue = strengths[index];
         if (strengthValue == 0 || std::isnan(coord)) return;
         int offset = index * stride;
-        double currentY = nodeBuffer[offset + 1];
-        double delta = (coord - currentY) * strengthValue * alpha;
+        float currentY = nodeBuffer[offset + 1];
+        float delta = static_cast<float>((coord - currentY) * strengthValue * alpha);
         nodeBuffer[offset + 3] += delta;
     }
 };
