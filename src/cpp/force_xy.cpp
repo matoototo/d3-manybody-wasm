@@ -2,6 +2,7 @@
 #include <vector>
 #include <functional>
 #include <cmath>
+#include <cstdint>
 
 class ForceXY {
 protected:
@@ -10,15 +11,26 @@ protected:
     std::vector<double> strengths;
     std::vector<double> coordz;
     emscripten::val nodes;
+    double* nodeBuffer = nullptr;
+    int nodeCount = 0;
+    static constexpr int stride = 4;
 
 public:
-    ForceXY(const emscripten::val& coord) : 
+    ForceXY(const emscripten::val& coord) :
         coordinate([coord](const emscripten::val&, int, const emscripten::val&) { return coord.as<double>(); }),
         strength([](const emscripten::val&, int, const emscripten::val&) { return 0.1; }) {}
 
-    virtual ~ForceXY() {} // Virtual destructor
+    virtual ~ForceXY() {}
 
     void force(double alpha) {
+        if (nodeBuffer != nullptr && nodeCount > 0) {
+            for (int i = 0; i < nodeCount; ++i) {
+                updateNodeVelocityBuffer(i, alpha);
+            }
+            return;
+        }
+
+        if (nodes.isUndefined()) return;
         int n = nodes["length"].as<int>();
         for (int i = 0; i < n; ++i) {
             emscripten::val node = nodes[i];
@@ -27,10 +39,12 @@ public:
     }
 
     virtual void updateNodeVelocity(emscripten::val& node, int i, double alpha) = 0;
+    virtual void updateNodeVelocityBuffer(int index, double alpha) = 0;
 
     void initialize() {
         if (nodes.isUndefined()) return;
         int n = nodes["length"].as<int>();
+        nodeCount = n;
         strengths.resize(n);
         coordz.resize(n);
         for (int i = 0; i < n; ++i) {
@@ -41,6 +55,11 @@ public:
 
     void setNodes(const emscripten::val& _nodes) {
         nodes = _nodes;
+        if (!nodes.isUndefined()) {
+            nodeCount = nodes["length"].as<int>();
+        } else {
+            nodeCount = 0;
+        }
         initialize();
     }
 
@@ -71,6 +90,11 @@ public:
         }
         initialize();
     }
+
+    void setNodeBuffer(uintptr_t ptr, int count) {
+        nodeBuffer = (ptr != 0 && count > 0) ? reinterpret_cast<double*>(ptr) : nullptr;
+        nodeCount = count;
+    }
 };
 
 class ForceX : public ForceXY {
@@ -79,6 +103,17 @@ public:
 
     void updateNodeVelocity(emscripten::val& node, int i, double alpha) override {
         node.set("vx", node["vx"].as<double>() + (coordz[i] - node["x"].as<double>()) * strengths[i] * alpha);
+    }
+
+    void updateNodeVelocityBuffer(int index, double alpha) override {
+        if (nodeBuffer == nullptr) return;
+        double coord = coordz[index];
+        double strengthValue = strengths[index];
+        if (strengthValue == 0 || std::isnan(coord)) return;
+        int offset = index * stride;
+        double currentX = nodeBuffer[offset];
+        double delta = (coord - currentX) * strengthValue * alpha;
+        nodeBuffer[offset + 2] += delta;
     }
 };
 
@@ -89,9 +124,19 @@ public:
     void updateNodeVelocity(emscripten::val& node, int i, double alpha) override {
         node.set("vy", node["vy"].as<double>() + (coordz[i] - node["y"].as<double>()) * strengths[i] * alpha);
     }
+
+    void updateNodeVelocityBuffer(int index, double alpha) override {
+        if (nodeBuffer == nullptr) return;
+        double coord = coordz[index];
+        double strengthValue = strengths[index];
+        if (strengthValue == 0 || std::isnan(coord)) return;
+        int offset = index * stride;
+        double currentY = nodeBuffer[offset + 1];
+        double delta = (coord - currentY) * strengthValue * alpha;
+        nodeBuffer[offset + 3] += delta;
+    }
 };
 
-// Factory functions
 ForceX* createForceX(const emscripten::val& x) {
     return new ForceX(x);
 }
@@ -100,12 +145,12 @@ ForceY* createForceY(const emscripten::val& y) {
     return new ForceY(y);
 }
 
-// Bindings
 EMSCRIPTEN_BINDINGS(force_xy_module) {
     emscripten::class_<ForceXY>("ForceXY")
         .function("force", &ForceXY::force)
         .function("initialize", &ForceXY::initialize)
         .function("setNodes", &ForceXY::setNodes)
+        .function("setNodeBuffer", &ForceXY::setNodeBuffer)
         .function("getStrength", &ForceXY::getStrength)
         .function("setStrength", &ForceXY::setStrength)
         .function("getCoordinate", &ForceXY::getCoordinate)

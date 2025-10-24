@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <cstdint>
 
 // Function to calculate the Morton code (Z-order curve) for 2D coordinates
 unsigned int mortonCode(double x, double y, double x0, double y0, double s, unsigned int scaleFactor) {
@@ -33,6 +34,10 @@ private:
     };
     std::vector<BodyData> bodyData;
 
+    double* nodeBuffer = nullptr;
+    int nodeCount = 0;
+    static constexpr int stride = 4;
+
     std::function<double()> random;
 
     struct QuadtreeNode {
@@ -49,7 +54,7 @@ private:
 
     // Find bounding box of all nodes
     void findExtent(double& x0, double& y0, double& x1, double& y1) {
-        int n = nodes["length"].as<int>();
+        int n = nodeCount;
         x0 = y0 = std::numeric_limits<double>::infinity();
         x1 = y1 = -std::numeric_limits<double>::infinity();
         for (int i = 0; i < n; ++i) {
@@ -118,9 +123,7 @@ private:
     }
 
     // Build the quadtree
-    void buildQuadtree() {
-        double x0, y0, x1, y1;
-        findExtent(x0, y0, x1, y1);
+    void buildQuadtree(double x0, double y0, double x1, double y1) {
         double cx = (x0 + x1) / 2;
         double cy = (y0 + y1) / 2;
         double s = std::max(x1 - x0, y1 - y0) / 2 * 1.1;
@@ -128,7 +131,7 @@ private:
         quadtreeNodes.clear();
         quadtreeNodes.emplace_back(cx, cy, s);
 
-        int n = nodes["length"].as<int>();
+        int n = nodeCount;
         for (int i = 0; i < n; ++i) {
             insertNode(0, i);
         }
@@ -196,15 +199,18 @@ public:
     void force(double alpha_) {
         alpha = alpha_;
 
-        // Sync data from JavaScript to C++
-        int n = nodes["length"].as<int>();
+        if (nodeBuffer == nullptr) return;
+
+        int n = nodeCount;
+        if (n == 0) return;
+
         bodyData.resize(n);
         for (int i = 0; i < n; ++i) {
-            emscripten::val node = nodes[i];
-            bodyData[i].x = node["x"].as<double>();
-            bodyData[i].y = node["y"].as<double>();
-            bodyData[i].vx = node["vx"].as<double>();
-            bodyData[i].vy = node["vy"].as<double>();
+            int offset = i * stride;
+            bodyData[i].x = nodeBuffer[offset];
+            bodyData[i].y = nodeBuffer[offset + 1];
+            bodyData[i].vx = nodeBuffer[offset + 2];
+            bodyData[i].vy = nodeBuffer[offset + 3];
         }
 
         // Calculate Morton codes and sort nodes
@@ -229,7 +235,7 @@ public:
 
         bodyData = newBodyData;
 
-        buildQuadtree();
+        buildQuadtree(x0, y0, x1, y1);
         propagate();
 
         // Apply forces using C++ data
@@ -239,9 +245,10 @@ public:
 
         // Sync data back to JavaScript
         for (int i = 0; i < n; ++i) {
-            emscripten::val node = nodes[sortedIndices[i].second];
-            node.set("vx", bodyData[i].vx);
-            node.set("vy", bodyData[i].vy);
+            int originalIndex = sortedIndices[i].second;
+            int offset = originalIndex * stride;
+            nodeBuffer[offset + 2] = bodyData[i].vx;
+            nodeBuffer[offset + 3] = bodyData[i].vy;
         }
 
         quadtreeNodes.clear();
@@ -250,6 +257,7 @@ public:
     void initialize() {
         if (nodes.isUndefined()) return;
         int n = nodes["length"].as<int>();
+        nodeCount = n;
         strengths.resize(n);
         for (int i = 0; i < n; ++i) {
             emscripten::val node = nodes[i];
@@ -261,14 +269,13 @@ public:
         nodes = _nodes;
         int n = nodes["length"].as<int>();
         bodyData.resize(n);
-        for (int i = 0; i < n; ++i) {
-            emscripten::val node = nodes[i];
-            bodyData[i].x = node["x"].as<double>();
-            bodyData[i].y = node["y"].as<double>();
-            bodyData[i].vx = node["vx"].as<double>();
-            bodyData[i].vy = node["vy"].as<double>();
-        }
+        nodeCount = n;
         initialize();
+    }
+
+    void setNodeBuffer(uintptr_t ptr, int count) {
+        nodeBuffer = reinterpret_cast<double*>(ptr);
+        nodeCount = count;
     }
 
     void setStrength(const emscripten::val& _strength) {
@@ -321,6 +328,7 @@ EMSCRIPTEN_BINDINGS(force_many_body_module) {
         .constructor<>()
         .function("force", &ForceManyBody::force)
         .function("setNodes", &ForceManyBody::setNodes)
+        .function("setNodeBuffer", &ForceManyBody::setNodeBuffer)
         .function("setStrength", &ForceManyBody::setStrength)
         .function("getStrength", &ForceManyBody::getStrength)
         .function("setDistanceMin", &ForceManyBody::setDistanceMin)
