@@ -12,8 +12,8 @@
     "src"
   ],
   "scripts": {
-    "build": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm.js src/cpp/force_many_body.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -msimd128 -O3",
-    "build:debug": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm-debug.js src/cpp/force_many_body.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -msimd128 -O0 -g4",
+    "build": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm.js src/cpp/force_many_body.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"HEAPF32\"]' -msimd128 -O3",
+    "build:debug": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm-debug.js src/cpp/force_many_body.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"HEAPF32\"]' -msimd128 -O0 -g4",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
