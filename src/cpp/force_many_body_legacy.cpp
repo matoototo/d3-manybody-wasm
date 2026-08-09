@@ -44,6 +44,14 @@ private:
     std::vector<BodyData> bodyData;
     std::vector<BodyData> reorderedBodyData;
 
+    struct Acceleration {
+        float x, y;
+    };
+    std::vector<Acceleration> cachedAcceleration;
+    std::vector<Acceleration> accelerationTrend;
+    bool cachedAccelerationValid = false;
+    int replayAge = 0;
+
     struct SortEntry {
         unsigned int code;
         int index;
@@ -67,6 +75,7 @@ private:
         double value = 0;  // Total mass
         double x = 0, y = 0;  // Center of mass
         int firstChild = -1;  // Index of first child, or -1 if leaf node
+        std::uint8_t childMask = 0;
 
         QuadtreeNode(double cx_, double cy_, double s_) : cx(cx_), cy(cy_), s(s_) {}
     };
@@ -183,11 +192,13 @@ private:
 
             // Combine the masses and centers of the children
             double mass = 0, x = 0, y = 0;
+            std::uint8_t childMask = 0;
             for (int j = 0; j < 4; ++j) {
                 QuadtreeNode& child = quadtreeNodes[node.firstChild + j];
                 mass += child.value;
                 x += child.x * child.value;
                 y += child.y * child.value;
+                if (child.value != 0) childMask |= static_cast<std::uint8_t>(1u << j);
             }
 
             if (mass > 0) {
@@ -195,6 +206,7 @@ private:
                 node.y = y / mass;
             }
             node.value = mass;
+            node.childMask = childMask;
         }
     }
 
@@ -223,7 +235,7 @@ private:
             }
         } else if (quad.firstChild >= 0) {
             for (int i = 0; i < 4; ++i) {
-                apply(quad.firstChild + i, body);
+                if (quad.childMask & (1u << i)) apply(quad.firstChild + i, body);
             }
         }
     }
@@ -385,12 +397,31 @@ private:
         }
 #endif
 
+        const bool hadCachedAcceleration = cachedAccelerationValid;
+        const float trendDivisor = static_cast<float>(replayAge + 1);
         for (int index = 0; index < n; ++index) {
             const int originalIndex = sortedIndices[index].index;
             const int offset = originalIndex * stride;
+            if (alpha != 0) {
+                const float accelerationX = static_cast<float>(
+                    (bodyData[index].vx - nodeBuffer[offset + 2]) / alpha
+                );
+                const float accelerationY = static_cast<float>(
+                    (bodyData[index].vy - nodeBuffer[offset + 3]) / alpha
+                );
+                accelerationTrend[originalIndex].x = hadCachedAcceleration
+                    ? (accelerationX - cachedAcceleration[originalIndex].x) / trendDivisor
+                    : 0;
+                accelerationTrend[originalIndex].y = hadCachedAcceleration
+                    ? (accelerationY - cachedAcceleration[originalIndex].y) / trendDivisor
+                    : 0;
+                cachedAcceleration[originalIndex] = {accelerationX, accelerationY};
+            }
             nodeBuffer[offset + 2] = bodyData[index].vx;
             nodeBuffer[offset + 3] = bodyData[index].vy;
         }
+        cachedAccelerationValid = alpha != 0;
+        replayAge = 0;
         quadtreeNodes.clear();
     }
 
@@ -494,11 +525,39 @@ public:
         applyPrepared();
     }
 
+    void replay(double alpha_) {
+        if (nodeBuffer == nullptr || !cachedAccelerationValid) return;
+        const float replayAlpha = static_cast<float>(alpha_);
+        const int age = advanceReplayAge();
+        const int predictionAge = std::min(age, 4);
+        for (int index = 0; index < nodeCount; ++index) {
+            const int offset = index * stride;
+            nodeBuffer[offset + 2] += (
+                cachedAcceleration[index].x + accelerationTrend[index].x * predictionAge
+            ) * replayAlpha;
+            nodeBuffer[offset + 3] += (
+                cachedAcceleration[index].y + accelerationTrend[index].y * predictionAge
+            ) * replayAlpha;
+        }
+    }
+
+    int advanceReplayAge() { return ++replayAge; }
+    uintptr_t getCachedAccelerationPointer() const {
+        return reinterpret_cast<uintptr_t>(cachedAcceleration.data());
+    }
+    uintptr_t getAccelerationTrendPointer() const {
+        return reinterpret_cast<uintptr_t>(accelerationTrend.data());
+    }
+
     void initialize() {
         if (nodes.isUndefined()) return;
         int n = nodes["length"].as<int>();
         nodeCount = n;
         strengths.resize(n);
+        cachedAcceleration.resize(n);
+        accelerationTrend.resize(n);
+        cachedAccelerationValid = false;
+        replayAge = 0;
         for (int i = 0; i < n; ++i) {
             emscripten::val node = nodes[i];
             strengths[i] = static_cast<float>(strength(node, i, nodes));
@@ -581,6 +640,10 @@ EMSCRIPTEN_BINDINGS(force_many_body_legacy_module) {
     emscripten::class_<ForceManyBodyLegacy>("ForceManyBodyLegacy")
         .constructor<>()
         .function("force", &ForceManyBodyLegacy::force)
+        .function("replay", &ForceManyBodyLegacy::replay)
+        .function("advanceReplayAge", &ForceManyBodyLegacy::advanceReplayAge)
+        .function("getCachedAccelerationPointer", &ForceManyBodyLegacy::getCachedAccelerationPointer)
+        .function("getAccelerationTrendPointer", &ForceManyBodyLegacy::getAccelerationTrendPointer)
         .function("setNodes", &ForceManyBodyLegacy::setNodes)
         .function("setNodeBuffer", &ForceManyBodyLegacy::setNodeBuffer)
         .function("setStrength", &ForceManyBodyLegacy::setStrength)

@@ -3,6 +3,7 @@
 #include <functional>
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 
 class ForceXY {
 protected:
@@ -149,6 +150,64 @@ ForceY* createForceY(const emscripten::val& y) {
     return new ForceY(y);
 }
 
+void integrateNodeBuffer(uintptr_t pointer, int count, double velocityRetention) {
+    if (pointer == 0 || count <= 0) return;
+    double* nodeBuffer = reinterpret_cast<double*>(pointer);
+    for (int index = 0; index < count; ++index) {
+        const int offset = index * 4;
+        nodeBuffer[offset + 2] *= velocityRetention;
+        nodeBuffer[offset + 3] *= velocityRetention;
+        nodeBuffer[offset] += nodeBuffer[offset + 2];
+        nodeBuffer[offset + 1] += nodeBuffer[offset + 3];
+    }
+}
+
+struct ReplayAcceleration {
+    float x, y;
+};
+
+void replayTwoFieldsAndIntegrate(
+    uintptr_t nodePointer,
+    int count,
+    double alphaValue,
+    double velocityRetention,
+    uintptr_t firstAccelerationPointer,
+    uintptr_t firstTrendPointer,
+    int firstAge,
+    uintptr_t secondAccelerationPointer,
+    uintptr_t secondTrendPointer,
+    int secondAge
+) {
+    if (nodePointer == 0 || count <= 0) return;
+    double* nodeBuffer = reinterpret_cast<double*>(nodePointer);
+    const ReplayAcceleration* firstAcceleration = reinterpret_cast<ReplayAcceleration*>(firstAccelerationPointer);
+    const ReplayAcceleration* firstTrend = reinterpret_cast<ReplayAcceleration*>(firstTrendPointer);
+    const ReplayAcceleration* secondAcceleration = reinterpret_cast<ReplayAcceleration*>(secondAccelerationPointer);
+    const ReplayAcceleration* secondTrend = reinterpret_cast<ReplayAcceleration*>(secondTrendPointer);
+    const float alpha = static_cast<float>(alphaValue);
+    const int firstPredictionAge = std::min(firstAge, 4);
+    const int secondPredictionAge = std::min(secondAge, 4);
+    for (int index = 0; index < count; ++index) {
+        const int offset = index * 4;
+        nodeBuffer[offset + 2] += (
+            firstAcceleration[index].x + firstTrend[index].x * firstPredictionAge
+        ) * alpha;
+        nodeBuffer[offset + 3] += (
+            firstAcceleration[index].y + firstTrend[index].y * firstPredictionAge
+        ) * alpha;
+        nodeBuffer[offset + 2] += (
+            secondAcceleration[index].x + secondTrend[index].x * secondPredictionAge
+        ) * alpha;
+        nodeBuffer[offset + 3] += (
+            secondAcceleration[index].y + secondTrend[index].y * secondPredictionAge
+        ) * alpha;
+        nodeBuffer[offset + 2] *= velocityRetention;
+        nodeBuffer[offset + 3] *= velocityRetention;
+        nodeBuffer[offset] += nodeBuffer[offset + 2];
+        nodeBuffer[offset + 1] += nodeBuffer[offset + 3];
+    }
+}
+
 EMSCRIPTEN_BINDINGS(force_xy_module) {
     emscripten::class_<ForceXY>("ForceXY")
         .function("force", &ForceXY::force)
@@ -168,4 +227,6 @@ EMSCRIPTEN_BINDINGS(force_xy_module) {
 
     emscripten::function("createForceX", &createForceX, emscripten::allow_raw_pointers());
     emscripten::function("createForceY", &createForceY, emscripten::allow_raw_pointers());
+    emscripten::function("integrateNodeBuffer", &integrateNodeBuffer);
+    emscripten::function("replayTwoFieldsAndIntegrate", &replayTwoFieldsAndIntegrate);
 }

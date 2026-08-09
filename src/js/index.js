@@ -95,6 +95,27 @@ function writeBufferToNodes(view, nodes, count) {
     }
 }
 
+function writeNodePositionsToBuffer(nodes, view, count) {
+    if (!view) return;
+    for (let i = 0; i < count; ++i) {
+        const base = i * STRIDE;
+        view[base] = nodes[i].x;
+        view[base + 1] = nodes[i].y;
+    }
+}
+
+function writePersistentBufferToNodes(view, nodes, count) {
+    if (!view) return;
+    for (let i = 0; i < count; ++i) {
+        const node = nodes[i];
+        const base = i * STRIDE;
+        node.x = view[base];
+        node.y = view[base + 1];
+        node.vx = 0;
+        node.vy = 0;
+    }
+}
+
 function initializeWasm() {
     if (!initializationPromise) {
         initializationPromise = createModule().then(module => {
@@ -278,6 +299,20 @@ function createForceManyBody(createNativeForce) {
 
     forceWrapper._prepare = syncNodesToBuffer;
     forceWrapper._apply = (alpha) => force.force(alpha);
+    if (typeof force.replay === 'function') forceWrapper._replay = (alpha) => force.replay(alpha);
+    if (typeof force.advanceReplayAge === 'function') {
+        forceWrapper._advanceReplayField = () => {
+            forceWrapper._replayFieldPointers ??= [
+                force.getCachedAccelerationPointer(),
+                force.getAccelerationTrendPointer()
+            ];
+            return [
+                forceWrapper._replayFieldPointers[0],
+                forceWrapper._replayFieldPointers[1],
+                force.advanceReplayAge()
+            ];
+        };
+    }
     forceWrapper._flush = syncBufferToNodes;
     if (typeof force.beginPrecompute === 'function') {
         forceWrapper._before = alpha => force.beginPrecompute(alpha);
@@ -289,6 +324,7 @@ function createForceManyBody(createNativeForce) {
         nodeCount = nodesRef ? nodesRef.length : 0;
         bufferEntry = null;
         bufferView = null;
+        forceWrapper._replayFieldPointers = null;
 
         force.setNodes(nodes);
         configureStrengths();
@@ -521,6 +557,8 @@ function createForceLink(initialLinks = []) {
     let distanceAccessor = () => 30;
     let counts = [];
     let iterationCount = 1;
+    let persistentStarted = false;
+    const fixedConstraints = [];
     const syncToken = {};
 
     const syncNodesToBuffer = (alpha) => {
@@ -554,6 +592,9 @@ function createForceLink(initialLinks = []) {
         }
         bufferEntry = null;
         bufferView = null;
+        persistentStarted = false;
+        fixedConstraints.length = 0;
+        forceWrapper._replayFieldPointers = null;
     }
 
     function defaultStrength(link) {
@@ -604,7 +645,69 @@ function createForceLink(initialLinks = []) {
 
     forceWrapper._prepare = syncNodesToBuffer;
     forceWrapper._apply = (alpha) => force.force(alpha ?? 0);
+    if (typeof force.replay === 'function') forceWrapper._replay = (alpha) => force.replay(alpha);
+    if (typeof force.advanceReplayAge === 'function') {
+        forceWrapper._advanceReplayField = () => {
+            forceWrapper._replayFieldPointers ??= [
+                force.getCachedAccelerationPointer(),
+                force.getAccelerationTrendPointer()
+            ];
+            return [
+                forceWrapper._replayFieldPointers[0],
+                forceWrapper._replayFieldPointers[1],
+                force.advanceReplayAge()
+            ];
+        };
+    }
     forceWrapper._flush = syncBufferToNodes;
+    forceWrapper._preparePersistent = function () {
+        if (!nodesRef || nodeCount === 0 || !bufferEntry) return false;
+        fixedConstraints.length = 0;
+        for (let index = 0; index < nodeCount; ++index) {
+            const node = nodesRef[index];
+            if (persistentStarted && (node.vx !== 0 || node.vy !== 0)) {
+                fixedConstraints.length = 0;
+                persistentStarted = false;
+                return false;
+            }
+            if (node.fx != null || node.fy != null) {
+                fixedConstraints.push({ index, fx: node.fx, fy: node.fy });
+            }
+        }
+        bufferView = refreshEntryView(bufferEntry);
+        if (!bufferView) {
+            persistentStarted = false;
+            return false;
+        }
+        if (persistentStarted) writeNodePositionsToBuffer(nodesRef, bufferView, nodeCount);
+        else writeNodesToBuffer(nodesRef, bufferView, nodeCount);
+        if (fixedConstraints.length > 0) forceWrapper._applyFixedConstraints();
+        persistentStarted = true;
+        return true;
+    };
+    forceWrapper._hasFixedConstraints = () => fixedConstraints.length > 0;
+    forceWrapper._applyFixedConstraints = function () {
+        for (const constraint of fixedConstraints) {
+            const base = constraint.index * STRIDE;
+            if (constraint.fx != null) {
+                bufferView[base] = constraint.fx;
+                bufferView[base + 2] = 0;
+            }
+            if (constraint.fy != null) {
+                bufferView[base + 1] = constraint.fy;
+                bufferView[base + 3] = 0;
+            }
+        }
+    };
+    forceWrapper._integrate = (velocityRetention) => {
+        moduleInstance.integrateNodeBuffer(bufferEntry.ptr, nodeCount, velocityRetention);
+        if (fixedConstraints.length > 0) forceWrapper._applyFixedConstraints();
+    };
+    forceWrapper._bufferDescriptor = () => [bufferEntry.ptr, nodeCount];
+    forceWrapper._flushPersistent = function () {
+        bufferView = refreshEntryView(bufferEntry);
+        if (bufferView) writePersistentBufferToNodes(bufferView, nodesRef, nodeCount);
+    };
 
     forceWrapper.initialize = function (nodes) {
         releaseBuffer();
@@ -676,14 +779,137 @@ function createForceBundle(forces) {
     }
 
     const linkForce = bundledForces.find(force => typeof force.links === 'function');
+    const adaptiveCadence = new Map();
+    let substepCount = 1;
+    let substepAlphaDecay = 0.015;
+    let substepVelocityDecay = 0.4;
+    let fixedAlphaTarget = Number.POSITIVE_INFINITY;
+    let virtualAlpha = null;
+    let lastOuterAlpha = null;
+    let lastAlphaTarget = 0;
+
+    function resetAdaptiveCadence() {
+        for (const schedule of adaptiveCadence.values()) schedule.skip = 0;
+    }
+
+    function applyForces(alpha, velocityRetention = null) {
+        const operations = [];
+        for (const force of bundledForces) {
+            const schedule = adaptiveCadence.get(force);
+            if (!schedule) {
+                operations.push([force, alpha, false]);
+                continue;
+            }
+            if (schedule.skip > 0) {
+                --schedule.skip;
+                if (schedule.reuseLast) operations.push([force, alpha, true]);
+                continue;
+            }
+            // Preserve every high-alpha update, then amortize weak late-stage
+            // updates while keeping each applied impulse bounded.
+            const interval = Math.max(1, Math.min(
+                schedule.maxInterval,
+                Math.floor(schedule.targetImpulse / Math.max(alpha, Number.EPSILON))
+            ));
+            operations.push([force, schedule.reuseLast ? alpha : alpha * interval, false]);
+            schedule.skip = interval - 1;
+        }
+        for (const [force, effectiveAlpha, replay] of operations) {
+            if (!replay) force._before?.(effectiveAlpha);
+        }
+        if (
+            velocityRetention != null &&
+            operations.length === 2 &&
+            operations.every(([force, effectiveAlpha, replay]) =>
+                replay && effectiveAlpha === alpha && typeof force._advanceReplayField === 'function'
+            )
+        ) {
+            const [nodePointer, nodeCount] = bundledForces[0]._bufferDescriptor();
+            const first = operations[0][0]._advanceReplayField();
+            const second = operations[1][0]._advanceReplayField();
+            moduleInstance.replayTwoFieldsAndIntegrate(
+                nodePointer,
+                nodeCount,
+                alpha,
+                velocityRetention,
+                first[0],
+                first[1],
+                first[2],
+                second[0],
+                second[1],
+                second[2]
+            );
+            if (bundledForces[0]._hasFixedConstraints?.()) {
+                bundledForces[0]._applyFixedConstraints();
+            }
+            return true;
+        }
+        for (const [force, effectiveAlpha, replay] of operations) {
+            if (replay) force._replay(effectiveAlpha);
+            else force._apply(effectiveAlpha);
+        }
+        return false;
+    }
+
     function bundle(alpha) {
-        bundledForces[0]._prepare(alpha);
-        for (const force of bundledForces) force._before?.(alpha);
-        for (const force of bundledForces) force._apply(alpha);
-        bundledForces[bundledForces.length - 1]._flush(alpha);
+        const firstForce = bundledForces[0];
+        const alphaRetention = 1 - substepAlphaDecay;
+        const outerAlphaRetention = Math.pow(alphaRetention, substepCount);
+        const outerAlphaDecay = 1 - outerAlphaRetention;
+        let priorAlpha = alpha / outerAlphaRetention;
+        let alphaTarget = 0;
+
+        if (lastOuterAlpha != null) {
+            if (substepCount === 1) {
+                if (alpha > lastOuterAlpha + 1e-12) resetAdaptiveCadence();
+            } else {
+                // D3 only passes the alpha after its outer tick. Infer its target
+                // so the bundled virtual ticks follow reheats as well as cooling.
+                const alphaDelta = alpha - lastOuterAlpha;
+                const isDiscontinuous = Math.abs(alphaDelta) > outerAlphaDecay * (1 + Math.abs(lastOuterAlpha)) + 1e-12;
+                if (isDiscontinuous) {
+                    resetAdaptiveCadence();
+                    virtualAlpha = null;
+                } else {
+                    priorAlpha = lastOuterAlpha;
+                    alphaTarget = outerAlphaDecay > 0
+                        ? (alpha - priorAlpha * outerAlphaRetention) / outerAlphaDecay
+                        : alpha;
+                    if (Math.abs(alphaTarget - lastAlphaTarget) > 1e-9) resetAdaptiveCadence();
+                }
+            }
+        }
+        lastOuterAlpha = alpha;
+        lastAlphaTarget = alphaTarget;
+
+        if (substepCount === 1 || !firstForce._preparePersistent?.()) {
+            virtualAlpha = alpha;
+            firstForce._prepare(alpha);
+            applyForces(alpha);
+            bundledForces[bundledForces.length - 1]._flush(alpha);
+            return;
+        }
+
+        const hasFixedConstraints = Boolean(firstForce._hasFixedConstraints?.());
+        if (hasFixedConstraints) resetAdaptiveCadence();
+        const velocityRetention = 1 - substepVelocityDecay;
+        const activeAlphaTarget = hasFixedConstraints
+            ? Math.min(alphaTarget, fixedAlphaTarget)
+            : alphaTarget;
+        if (virtualAlpha == null) virtualAlpha = priorAlpha;
+        for (let step = 0; step < substepCount; ++step) {
+            virtualAlpha += (activeAlphaTarget - virtualAlpha) * substepAlphaDecay;
+            const integrated = applyForces(virtualAlpha, velocityRetention);
+            if (!integrated) firstForce._integrate(velocityRetention);
+        }
+        firstForce._flushPersistent();
     }
 
     bundle.initialize = function (nodes, random) {
+        resetAdaptiveCadence();
+        virtualAlpha = null;
+        lastOuterAlpha = null;
+        lastAlphaTarget = 0;
         for (const force of bundledForces) force.initialize(nodes, random);
         return bundle;
     };
@@ -702,6 +928,47 @@ function createForceBundle(forces) {
     }
 
     bundle.forces = () => [...bundledForces];
+    bundle.substeps = function (count, {
+        alphaDecay = 0.015,
+        velocityDecay = 0.4,
+        fixedAlphaTarget: fixedTarget = Number.POSITIVE_INFINITY
+    } = {}) {
+        if (count > 1 && (
+            typeof bundledForces[0]._preparePersistent !== 'function' ||
+            typeof bundledForces[0]._integrate !== 'function' ||
+            typeof bundledForces[0]._flushPersistent !== 'function'
+        )) {
+            throw new Error('substeps require a link force as the first bundled force');
+        }
+        substepCount = Math.max(1, Math.round(Number(count)));
+        substepAlphaDecay = Math.min(1, Math.max(0, Number(alphaDecay)));
+        substepVelocityDecay = Math.min(1, Math.max(0, Number(velocityDecay)));
+        fixedAlphaTarget = Number.isFinite(Number(fixedTarget))
+            ? Math.max(0, Number(fixedTarget))
+            : Number.POSITIVE_INFINITY;
+        resetAdaptiveCadence();
+        virtualAlpha = null;
+        lastOuterAlpha = null;
+        lastAlphaTarget = 0;
+        return bundle;
+    };
+    bundle.adaptiveCadence = function (force, {
+        targetImpulse = 0.4,
+        maxInterval = 8,
+        reuseLast = false
+    } = {}) {
+        if (!bundledForces.includes(force)) throw new Error('adaptive cadence force is not part of this bundle');
+        if (reuseLast && typeof force._replay !== 'function') {
+            throw new Error('adaptive cadence force does not support field reuse');
+        }
+        adaptiveCadence.set(force, {
+            targetImpulse: Math.max(Number.EPSILON, Number(targetImpulse)),
+            maxInterval: Math.max(1, Math.round(Number(maxInterval))),
+            reuseLast: Boolean(reuseLast),
+            skip: 0
+        });
+        return bundle;
+    };
     return bundle;
 }
 

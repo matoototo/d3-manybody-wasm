@@ -18,6 +18,19 @@ private:
     std::vector<double> biases;
     std::vector<double> strengths;
     std::vector<double> distances;
+
+    struct Velocity {
+        double x, y;
+    };
+    struct Acceleration {
+        float x, y;
+    };
+    std::vector<Velocity> initialVelocity;
+    std::vector<Acceleration> cachedAcceleration;
+    std::vector<Acceleration> accelerationTrend;
+    bool cachedAccelerationValid = false;
+    int replayAge = 0;
+
     double* nodeBuffer = nullptr;
     int nodeCount = 0;
     int iterations = 1;
@@ -32,6 +45,10 @@ public:
     void force(double alphaValue) {
         if (!nodeBuffer || nodeCount <= 0) return;
         const double alpha = alphaValue;
+        for (int index = 0; index < nodeCount; ++index) {
+            const int offset = index * kStride;
+            initialVelocity[index] = {nodeBuffer[offset + 2], nodeBuffer[offset + 3]};
+        }
         const int linkCount = static_cast<int>(sources.size());
         for (int iteration = 0; iteration < iterations; ++iteration) {
             for (int index = 0; index < linkCount; ++index) {
@@ -59,6 +76,51 @@ public:
                 nodeBuffer[sourceOffset + 3] += dy * sourceWeight;
             }
         }
+
+        const bool hadCachedAcceleration = cachedAccelerationValid;
+        const float trendDivisor = static_cast<float>(replayAge + 1);
+        if (alpha != 0) {
+            for (int index = 0; index < nodeCount; ++index) {
+                const int offset = index * kStride;
+                const Acceleration acceleration = {
+                    static_cast<float>((nodeBuffer[offset + 2] - initialVelocity[index].x) / alpha),
+                    static_cast<float>((nodeBuffer[offset + 3] - initialVelocity[index].y) / alpha)
+                };
+                accelerationTrend[index] = hadCachedAcceleration
+                    ? Acceleration{
+                        (acceleration.x - cachedAcceleration[index].x) / trendDivisor,
+                        (acceleration.y - cachedAcceleration[index].y) / trendDivisor
+                    }
+                    : Acceleration{0, 0};
+                cachedAcceleration[index] = acceleration;
+            }
+        }
+        cachedAccelerationValid = alpha != 0;
+        replayAge = 0;
+    }
+
+    void replay(double alpha) {
+        if (!nodeBuffer || !cachedAccelerationValid) return;
+        const int age = advanceReplayAge();
+        const int predictionAge = std::min(age, 4);
+        const float replayAlpha = static_cast<float>(alpha);
+        for (int index = 0; index < nodeCount; ++index) {
+            const int offset = index * kStride;
+            nodeBuffer[offset + 2] += (
+                cachedAcceleration[index].x + accelerationTrend[index].x * predictionAge
+            ) * replayAlpha;
+            nodeBuffer[offset + 3] += (
+                cachedAcceleration[index].y + accelerationTrend[index].y * predictionAge
+            ) * replayAlpha;
+        }
+    }
+
+    int advanceReplayAge() { return ++replayAge; }
+    uintptr_t getCachedAccelerationPointer() const {
+        return reinterpret_cast<uintptr_t>(cachedAcceleration.data());
+    }
+    uintptr_t getAccelerationTrendPointer() const {
+        return reinterpret_cast<uintptr_t>(accelerationTrend.data());
     }
 
     void setLinks(
@@ -86,6 +148,11 @@ public:
     void setNodeBuffer(uintptr_t pointer, int count) {
         nodeBuffer = pointer && count > 0 ? reinterpret_cast<double*>(pointer) : nullptr;
         nodeCount = count;
+        initialVelocity.resize(count);
+        cachedAcceleration.resize(count);
+        accelerationTrend.resize(count);
+        cachedAccelerationValid = false;
+        replayAge = 0;
     }
 
     void setIterations(int value) { iterations = std::max(1, value); }
@@ -98,6 +165,10 @@ EMSCRIPTEN_BINDINGS(force_link_module) {
     emscripten::class_<ForceLink>("ForceLink")
         .constructor<>()
         .function("force", &ForceLink::force)
+        .function("replay", &ForceLink::replay)
+        .function("advanceReplayAge", &ForceLink::advanceReplayAge)
+        .function("getCachedAccelerationPointer", &ForceLink::getCachedAccelerationPointer)
+        .function("getAccelerationTrendPointer", &ForceLink::getAccelerationTrendPointer)
         .function("setLinks", &ForceLink::setLinks)
         .function("setNodeBuffer", &ForceLink::setNodeBuffer)
         .function("setIterations", &ForceLink::setIterations)
