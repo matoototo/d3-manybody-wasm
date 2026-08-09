@@ -1,2 +1,3 @@
 dist
 .emscripten_cache/
+node_modules/

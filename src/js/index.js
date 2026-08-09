@@ -4,7 +4,7 @@ let moduleInstance = null;
 let initializationPromise = null;
 
 const STRIDE = 4;
-const BYTES_PER_VALUE = Float32Array.BYTES_PER_ELEMENT;
+const NODE_BYTES_PER_VALUE = Float64Array.BYTES_PER_ELEMENT;
 const nodeBufferRegistry = new WeakMap();
 
 function ensureModuleReady() {
@@ -20,10 +20,10 @@ function refreshEntryView(entry) {
     }
 
     const desiredLength = entry.count * STRIDE;
-    const heapBuffer = moduleInstance.HEAPF32.buffer;
+    const heapBuffer = moduleInstance.HEAPF64.buffer;
 
     if (!entry.view || entry.view.buffer !== heapBuffer || entry.view.length !== desiredLength) {
-        entry.view = new Float32Array(heapBuffer, entry.ptr, desiredLength);
+        entry.view = new Float64Array(heapBuffer, entry.ptr, desiredLength);
     }
 
     return entry.view;
@@ -34,7 +34,7 @@ function retainNodeBuffer(nodes, count) {
 
     let entry = nodeBufferRegistry.get(nodes);
     if (!entry) {
-        entry = { ptr: 0, capacity: 0, view: null, refCount: 0, count: 0, lastUploadAlpha: Number.NaN, lastDownloadAlpha: Number.NaN };
+        entry = { ptr: 0, capacity: 0, view: null, refCount: 0, count: 0, syncAlpha: Number.NaN, seenForces: new Set() };
         nodeBufferRegistry.set(nodes, entry);
     }
 
@@ -44,7 +44,7 @@ function retainNodeBuffer(nodes, count) {
             moduleInstance._free(entry.ptr);
         }
         if (required > 0) {
-            entry.ptr = moduleInstance._malloc(required * BYTES_PER_VALUE);
+            entry.ptr = moduleInstance._malloc(required * NODE_BYTES_PER_VALUE);
             entry.capacity = required;
         } else {
             entry.ptr = 0;
@@ -56,8 +56,8 @@ function retainNodeBuffer(nodes, count) {
     entry.refCount += 1;
     refreshEntryView(entry);
     // Reset per-tick markers when (re)allocating/retaining
-    entry.lastUploadAlpha = Number.NaN;
-    entry.lastDownloadAlpha = Number.NaN;
+    entry.syncAlpha = Number.NaN;
+    entry.seenForces.clear();
     return entry;
 }
 
@@ -76,12 +76,12 @@ function releaseNodeBuffer(nodes) {
 function writeNodesToBuffer(nodes, view, count) {
     if (!view) return;
     for (let i = 0; i < count; ++i) {
-        const node = nodes[i] || {};
+        const node = nodes[i];
         const base = i * STRIDE;
-        view[base] = node.x ?? 0;
-        view[base + 1] = node.y ?? 0;
-        view[base + 2] = node.vx ?? 0;
-        view[base + 3] = node.vy ?? 0;
+        view[base] = node.x;
+        view[base + 1] = node.y;
+        view[base + 2] = node.vx;
+        view[base + 3] = node.vy;
     }
 }
 
@@ -89,7 +89,6 @@ function writeBufferToNodes(view, nodes, count) {
     if (!view) return;
     for (let i = 0; i < count; ++i) {
         const node = nodes[i];
-        if (!node) continue;
         const base = i * STRIDE;
         node.vx = view[base + 2];
         node.vy = view[base + 3];
@@ -105,9 +104,6 @@ function initializeWasm() {
     return initializationPromise;
 }
 
-// Initialize WASM module immediately
-initializeWasm();
-
 function createAxisForce(createForceFunc, coordinateName) {
     return function axisForceFactory(coordinate) {
         ensureModuleReady();
@@ -117,15 +113,25 @@ function createAxisForce(createForceFunc, coordinateName) {
         let nodeCount = 0;
         let bufferEntry = null;
         let bufferView = null;
+        const syncToken = {};
 
         const syncNodesToBuffer = (alpha) => {
             if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-            if (bufferEntry.lastUploadAlpha === alpha) return;
+            if (!Object.is(bufferEntry.syncAlpha, alpha)) {
+                bufferEntry.syncAlpha = alpha;
+                bufferEntry.seenForces.clear();
+            } else if (bufferEntry.seenForces.has(syncToken)) {
+                // The same force appearing again marks a new tick even when a
+                // simulation deliberately keeps alpha constant.
+                bufferEntry.seenForces.clear();
+            }
+            const shouldUpload = bufferEntry.seenForces.size === 0;
+            bufferEntry.seenForces.add(syncToken);
+            if (!shouldUpload) return;
             bufferEntry.count = nodeCount;
             bufferView = refreshEntryView(bufferEntry);
             if (!bufferView) return;
             writeNodesToBuffer(nodesRef, bufferView, nodeCount);
-            bufferEntry.lastUploadAlpha = alpha;
         };
 
         const syncBufferToNodes = (_alpha) => {
@@ -146,10 +152,14 @@ function createAxisForce(createForceFunc, coordinateName) {
 
         function forceWrapper(alpha) {
             if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-            syncNodesToBuffer(alpha);
-            force.force(alpha);
-            syncBufferToNodes(alpha);
+            forceWrapper._prepare(alpha);
+            forceWrapper._apply(alpha);
+            forceWrapper._flush(alpha);
         }
+
+        forceWrapper._prepare = syncNodesToBuffer;
+        forceWrapper._apply = (alpha) => force.force(alpha);
+        forceWrapper._flush = syncBufferToNodes;
 
         forceWrapper.initialize = function (nodes) {
             releaseBuffer();
@@ -202,23 +212,45 @@ function createAxisForce(createForceFunc, coordinateName) {
     };
 }
 
-function createForceManyBody() {
+function createForceManyBody(createNativeForce) {
     ensureModuleReady();
 
-    const force = moduleInstance.createForceManyBody();
+    const force = createNativeForce();
     let nodesRef = null;
     let nodeCount = 0;
     let bufferEntry = null;
     let bufferView = null;
+    let strengthSetting = -30;
+    const syncToken = {};
+
+    const configureStrengths = () => {
+        if (typeof strengthSetting !== 'function') {
+            force.setStrength(Number(strengthSetting));
+            return;
+        }
+        if (!nodesRef) return;
+        const values = new Float32Array(nodeCount);
+        for (let index = 0; index < nodeCount; ++index) {
+            values[index] = Number(strengthSetting.call(nodesRef[index], nodesRef[index], index, nodesRef));
+        }
+        force.setStrengths(values);
+    };
 
     const syncNodesToBuffer = (alpha) => {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-        if (bufferEntry.lastUploadAlpha === alpha) return;
+        if (!Object.is(bufferEntry.syncAlpha, alpha)) {
+            bufferEntry.syncAlpha = alpha;
+            bufferEntry.seenForces.clear();
+        } else if (bufferEntry.seenForces.has(syncToken)) {
+            bufferEntry.seenForces.clear();
+        }
+        const shouldUpload = bufferEntry.seenForces.size === 0;
+        bufferEntry.seenForces.add(syncToken);
+        if (!shouldUpload) return;
         bufferEntry.count = nodeCount;
         bufferView = refreshEntryView(bufferEntry);
         if (!bufferView) return;
         writeNodesToBuffer(nodesRef, bufferView, nodeCount);
-        bufferEntry.lastUploadAlpha = alpha;
     };
 
     const syncBufferToNodes = (_alpha) => {
@@ -239,9 +271,16 @@ function createForceManyBody() {
 
     function forceWrapper(alpha) {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-        syncNodesToBuffer(alpha);
-        force.force(alpha);
-        syncBufferToNodes(alpha);
+        forceWrapper._prepare(alpha);
+        forceWrapper._apply(alpha);
+        forceWrapper._flush(alpha);
+    }
+
+    forceWrapper._prepare = syncNodesToBuffer;
+    forceWrapper._apply = (alpha) => force.force(alpha);
+    forceWrapper._flush = syncBufferToNodes;
+    if (typeof force.beginPrecompute === 'function') {
+        forceWrapper._before = alpha => force.beginPrecompute(alpha);
     }
 
     forceWrapper.initialize = function (nodes) {
@@ -252,6 +291,8 @@ function createForceManyBody() {
         bufferView = null;
 
         force.setNodes(nodes);
+        configureStrengths();
+        force.prepareWorkers?.();
 
         if (nodesRef && nodeCount > 0) {
             bufferEntry = retainNodeBuffer(nodesRef, nodeCount);
@@ -268,6 +309,7 @@ function createForceManyBody() {
     };
 
     forceWrapper.dispose = function () {
+        force.shutdownWorkers?.();
         releaseBuffer();
         nodesRef = null;
         nodeCount = 0;
@@ -275,10 +317,11 @@ function createForceManyBody() {
 
     forceWrapper.strength = function (_) {
         if (arguments.length) {
-            force.setStrength(_);
+            strengthSetting = _;
+            configureStrengths();
             return forceWrapper;
         }
-        return force.getStrength();
+        return typeof strengthSetting === 'function' ? strengthSetting : () => Number(strengthSetting);
     };
 
     forceWrapper.distanceMin = function (_) {
@@ -305,6 +348,12 @@ function createForceManyBody() {
         return force.getTheta();
     };
 
+    forceWrapper.axes = function (x, y, strength) {
+        if (typeof force.setAxes !== 'function') throw new Error('axes fusion is only available for the legacy force');
+        force.setAxes(Number(x), Number(y), Number(strength));
+        return forceWrapper;
+    };
+
     return forceWrapper;
 }
 
@@ -319,18 +368,23 @@ function createForceCollide() {
     let bufferView = null;
     let radiusAccessor = null;
     let radiusConstant = 1;
-    let radiusPtr = 0;
-    let radiusCapacity = 0;
-    let radiusView = null;
+    const syncToken = {};
 
     const syncNodesToBuffer = (alpha) => {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-        if (bufferEntry.lastUploadAlpha === alpha) return;
+        if (!Object.is(bufferEntry.syncAlpha, alpha)) {
+            bufferEntry.syncAlpha = alpha;
+            bufferEntry.seenForces.clear();
+        } else if (bufferEntry.seenForces.has(syncToken)) {
+            bufferEntry.seenForces.clear();
+        }
+        const shouldUpload = bufferEntry.seenForces.size === 0;
+        bufferEntry.seenForces.add(syncToken);
+        if (!shouldUpload) return;
         bufferEntry.count = nodeCount;
         bufferView = refreshEntryView(bufferEntry);
         if (!bufferView) return;
         writeNodesToBuffer(nodesRef, bufferView, nodeCount);
-        bufferEntry.lastUploadAlpha = alpha;
     };
 
     const syncBufferToNodes = (_alpha) => {
@@ -340,38 +394,7 @@ function createForceCollide() {
         writeBufferToNodes(bufferView, nodesRef, nodeCount);
     };
 
-    const refreshRadiusView = (length) => {
-        if (!radiusPtr || length <= 0) {
-            radiusView = null;
-            return null;
-        }
-        if (!radiusView || radiusView.buffer !== moduleInstance.HEAPF32.buffer || radiusView.length !== length) {
-            radiusView = new Float32Array(moduleInstance.HEAPF32.buffer, radiusPtr, length);
-        }
-        return radiusView;
-    };
-
-    const ensureRadiusBuffer = (count) => {
-        if (count <= 0) {
-            return releaseRadiusBuffer();
-        }
-        if (!radiusPtr || count > radiusCapacity) {
-            if (radiusPtr) {
-                moduleInstance._free(radiusPtr);
-            }
-            radiusPtr = moduleInstance._malloc(count * BYTES_PER_VALUE);
-            radiusCapacity = count;
-        }
-        refreshRadiusView(count);
-    };
-
     function releaseRadiusBuffer() {
-        if (radiusPtr) {
-            moduleInstance._free(radiusPtr);
-        }
-        radiusPtr = 0;
-        radiusCapacity = 0;
-        radiusView = null;
         force.setRadiusBuffer(0, 0);
     }
 
@@ -380,14 +403,14 @@ function createForceCollide() {
             releaseRadiusBuffer();
             return;
         }
-        ensureRadiusBuffer(nodeCount);
-        if (!radiusView) return;
+        const values = new Float32Array(nodeCount);
         for (let i = 0; i < nodeCount; ++i) {
             const node = nodesRef[i];
             const value = radiusAccessor.call(node, node, i, nodesRef);
-            radiusView[i] = Number.isFinite(value) && value > 0 ? value : 0;
+            values[i] = Number(value);
         }
-        force.setRadiusBuffer(radiusPtr, nodeCount);
+        releaseRadiusBuffer();
+        force.setRadii(values);
     };
 
     function releaseBuffer() {
@@ -402,10 +425,14 @@ function createForceCollide() {
 
     function forceWrapper(alpha) {
         if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
-        syncNodesToBuffer(alpha);
-        force.force(alpha ?? 0);
-        syncBufferToNodes(alpha);
+        forceWrapper._prepare(alpha);
+        forceWrapper._apply(alpha);
+        forceWrapper._flush(alpha);
     }
+
+    forceWrapper._prepare = syncNodesToBuffer;
+    forceWrapper._apply = (alpha) => force.force(alpha ?? 0);
+    forceWrapper._flush = syncBufferToNodes;
 
     forceWrapper.initialize = function (nodes) {
         releaseBuffer();
@@ -448,9 +475,7 @@ function createForceCollide() {
             if (typeof _ === 'function') {
                 radiusAccessor = _;
                 force.setRadius(0);
-                if (nodesRef && nodeCount > 0) {
-                    populateRadiusBuffer();
-                }
+                if (nodesRef && nodeCount > 0) populateRadiusBuffer();
             } else {
                 radiusAccessor = null;
                 radiusConstant = Number(_) || 0;
@@ -482,11 +507,212 @@ function createForceCollide() {
     return forceWrapper;
 }
 
+function createForceLink(initialLinks = []) {
+    ensureModuleReady();
+
+    const force = moduleInstance.createForceLink();
+    let linksRef = initialLinks || [];
+    let nodesRef = null;
+    let nodeCount = 0;
+    let bufferEntry = null;
+    let bufferView = null;
+    let idAccessor = (node) => node.index;
+    let strengthAccessor = null;
+    let distanceAccessor = () => 30;
+    let counts = [];
+    let iterationCount = 1;
+    const syncToken = {};
+
+    const syncNodesToBuffer = (alpha) => {
+        if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
+        if (!Object.is(bufferEntry.syncAlpha, alpha)) {
+            bufferEntry.syncAlpha = alpha;
+            bufferEntry.seenForces.clear();
+        } else if (bufferEntry.seenForces.has(syncToken)) {
+            bufferEntry.seenForces.clear();
+        }
+        const shouldUpload = bufferEntry.seenForces.size === 0;
+        bufferEntry.seenForces.add(syncToken);
+        if (!shouldUpload) return;
+        bufferEntry.count = nodeCount;
+        bufferView = refreshEntryView(bufferEntry);
+        if (!bufferView) return;
+        writeNodesToBuffer(nodesRef, bufferView, nodeCount);
+    };
+
+    const syncBufferToNodes = () => {
+        if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
+        bufferView = refreshEntryView(bufferEntry);
+        if (!bufferView) return;
+        writeBufferToNodes(bufferView, nodesRef, nodeCount);
+    };
+
+    function releaseBuffer() {
+        if (bufferEntry && nodesRef) {
+            force.setNodeBuffer(0, 0);
+            releaseNodeBuffer(nodesRef);
+        }
+        bufferEntry = null;
+        bufferView = null;
+    }
+
+    function defaultStrength(link) {
+        return 1 / Math.min(counts[link.source.index], counts[link.target.index]);
+    }
+
+    function configureLinks() {
+        if (!nodesRef) return;
+        const nodeById = new Map(nodesRef.map((node, index) => [idAccessor(node, index, nodesRef), node]));
+        counts = new Array(nodeCount).fill(0);
+
+        for (let index = 0; index < linksRef.length; ++index) {
+            const link = linksRef[index];
+            link.index = index;
+            if (typeof link.source !== 'object') link.source = nodeById.get(link.source);
+            if (typeof link.target !== 'object') link.target = nodeById.get(link.target);
+            if (!link.source) throw new Error(`node not found: ${link.source}`);
+            if (!link.target) throw new Error(`node not found: ${link.target}`);
+            counts[link.source.index] += 1;
+            counts[link.target.index] += 1;
+        }
+
+        const sources = new Int32Array(linksRef.length);
+        const targets = new Int32Array(linksRef.length);
+        const biases = new Float64Array(linksRef.length);
+        const strengths = new Float64Array(linksRef.length);
+        const distances = new Float64Array(linksRef.length);
+        const getStrength = strengthAccessor || defaultStrength;
+        for (let index = 0; index < linksRef.length; ++index) {
+            const link = linksRef[index];
+            const sourceCount = counts[link.source.index];
+            const targetCount = counts[link.target.index];
+            sources[index] = link.source.index;
+            targets[index] = link.target.index;
+            biases[index] = sourceCount / (sourceCount + targetCount);
+            strengths[index] = Number(getStrength(link, index, linksRef));
+            distances[index] = Number(distanceAccessor(link, index, linksRef));
+        }
+        force.setLinks(sources, targets, biases, strengths, distances);
+    }
+
+    function forceWrapper(alpha) {
+        if (!nodesRef || nodeCount === 0 || !bufferEntry) return;
+        forceWrapper._prepare(alpha);
+        forceWrapper._apply(alpha);
+        forceWrapper._flush(alpha);
+    }
+
+    forceWrapper._prepare = syncNodesToBuffer;
+    forceWrapper._apply = (alpha) => force.force(alpha ?? 0);
+    forceWrapper._flush = syncBufferToNodes;
+
+    forceWrapper.initialize = function (nodes) {
+        releaseBuffer();
+        nodesRef = nodes || null;
+        nodeCount = nodesRef ? nodesRef.length : 0;
+        if (nodesRef && nodeCount > 0) {
+            bufferEntry = retainNodeBuffer(nodesRef, nodeCount);
+            force.setNodeBuffer(bufferEntry.ptr, nodeCount);
+            bufferView = refreshEntryView(bufferEntry);
+            configureLinks();
+        } else {
+            force.setNodeBuffer(0, 0);
+        }
+        return forceWrapper;
+    };
+
+    forceWrapper.dispose = function () {
+        releaseBuffer();
+        nodesRef = null;
+        nodeCount = 0;
+    };
+
+    forceWrapper.links = function (_) {
+        if (!arguments.length) return linksRef;
+        linksRef = _ || [];
+        configureLinks();
+        return forceWrapper;
+    };
+
+    forceWrapper.id = function (_) {
+        if (!arguments.length) return idAccessor;
+        idAccessor = _;
+        configureLinks();
+        return forceWrapper;
+    };
+
+    forceWrapper.iterations = function (_) {
+        if (!arguments.length) return iterationCount;
+        iterationCount = Math.max(1, Math.round(Number(_)));
+        force.setIterations(iterationCount);
+        return forceWrapper;
+    };
+
+    forceWrapper.strength = function (_) {
+        if (!arguments.length) return strengthAccessor || defaultStrength;
+        strengthAccessor = typeof _ === 'function' ? _ : () => Number(_);
+        configureLinks();
+        return forceWrapper;
+    };
+
+    forceWrapper.distance = function (_) {
+        if (!arguments.length) return distanceAccessor;
+        distanceAccessor = typeof _ === 'function' ? _ : () => Number(_);
+        configureLinks();
+        return forceWrapper;
+    };
+
+    return forceWrapper;
+}
+
+function createForceBundle(forces) {
+    const bundledForces = (forces || []).filter(Boolean);
+    if (!bundledForces.length || bundledForces.some(force =>
+        typeof force._prepare !== 'function' ||
+        typeof force._apply !== 'function' ||
+        typeof force._flush !== 'function'
+    )) {
+        throw new TypeError('forceBundle expects initialized d3-manybody-wasm forces');
+    }
+
+    const linkForce = bundledForces.find(force => typeof force.links === 'function');
+    function bundle(alpha) {
+        bundledForces[0]._prepare(alpha);
+        for (const force of bundledForces) force._before?.(alpha);
+        for (const force of bundledForces) force._apply(alpha);
+        bundledForces[bundledForces.length - 1]._flush(alpha);
+    }
+
+    bundle.initialize = function (nodes, random) {
+        for (const force of bundledForces) force.initialize(nodes, random);
+        return bundle;
+    };
+
+    bundle.dispose = function () {
+        for (const force of bundledForces) force.dispose?.();
+    };
+
+    for (const method of ['links', 'id', 'distance', 'iterations']) {
+        if (!linkForce || typeof linkForce[method] !== 'function') continue;
+        bundle[method] = function (_) {
+            if (!arguments.length) return linkForce[method]();
+            linkForce[method](_);
+            return bundle;
+        };
+    }
+
+    bundle.forces = () => [...bundledForces];
+    return bundle;
+}
+
 export const forceX = createAxisForce(x => moduleInstance.createForceX(x), 'x');
 export const forceY = createAxisForce(y => moduleInstance.createForceY(y), 'y');
-export const forceManyBody = createForceManyBody;
+export const forceManyBody = () => createForceManyBody(() => moduleInstance.createForceManyBodyLegacy());
+export const forceManyBodyLegacy = forceManyBody;
 export const forceCollide = createForceCollide;
+export const forceLink = createForceLink;
+export const forceBundle = createForceBundle;
 
 export function ensureInitialized() {
-    return initializationPromise;
+    return initializeWasm();
 }

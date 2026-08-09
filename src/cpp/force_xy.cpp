@@ -11,7 +11,7 @@ protected:
     std::vector<float> strengths;
     std::vector<float> coordz;
     emscripten::val nodes;
-    float* nodeBuffer = nullptr;
+    double* nodeBuffer = nullptr;
     int nodeCount = 0;
     static constexpr int stride = 4;
 
@@ -94,7 +94,7 @@ public:
     }
 
     void setNodeBuffer(uintptr_t ptr, int count) {
-        nodeBuffer = (ptr != 0 && count > 0) ? reinterpret_cast<float*>(ptr) : nullptr;
+        nodeBuffer = (ptr != 0 && count > 0) ? reinterpret_cast<double*>(ptr) : nullptr;
         nodeCount = count;
     }
 };
@@ -113,9 +113,10 @@ public:
         float strengthValue = strengths[index];
         if (strengthValue == 0 || std::isnan(coord)) return;
         int offset = index * stride;
-        float currentX = nodeBuffer[offset];
+        float currentX = static_cast<float>(nodeBuffer[offset]);
+        float currentVelocity = static_cast<float>(nodeBuffer[offset + 2]);
         float delta = static_cast<float>((coord - currentX) * strengthValue * alpha);
-        nodeBuffer[offset + 2] += delta;
+        nodeBuffer[offset + 2] = static_cast<float>(currentVelocity + delta);
     }
 };
 
@@ -133,9 +134,10 @@ public:
         float strengthValue = strengths[index];
         if (strengthValue == 0 || std::isnan(coord)) return;
         int offset = index * stride;
-        float currentY = nodeBuffer[offset + 1];
+        float currentY = static_cast<float>(nodeBuffer[offset + 1]);
+        float currentVelocity = static_cast<float>(nodeBuffer[offset + 3]);
         float delta = static_cast<float>((coord - currentY) * strengthValue * alpha);
-        nodeBuffer[offset + 3] += delta;
+        nodeBuffer[offset + 3] = static_cast<float>(currentVelocity + delta);
     }
 };
 

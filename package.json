@@ -12,8 +12,9 @@
     "src"
   ],
   "scripts": {
-    "build": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm.js src/cpp/force_many_body.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"HEAPF32\"]' -msimd128 -O3",
-    "build:debug": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm-debug.js src/cpp/force_many_body.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"HEAPF32\"]' -msimd128 -O0 -g4",
+    "build": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm.js src/cpp/force_many_body_legacy.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp src/cpp/force_link.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"HEAPF32\",\"HEAPF64\"]' -msimd128 -O3 -flto -pthread -s 'PTHREAD_POOL_SIZE=Math.max(0,Math.min(7,(navigator.hardwareConcurrency||1)-1))'",
+    "build:debug": "mkdir -p dist && emcc --bind -o dist/d3-manybody-wasm-debug.js src/cpp/force_many_body_legacy.cpp src/cpp/force_xy.cpp src/cpp/force_collide.cpp src/cpp/force_link.cpp -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=1 -s ENVIRONMENT='web,worker,node' -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s EXPORTED_FUNCTIONS='[\"_malloc\",\"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"HEAPF32\",\"HEAPF64\"]' -msimd128 -O0 -g4 -pthread -s 'PTHREAD_POOL_SIZE=Math.max(0,Math.min(7,(navigator.hardwareConcurrency||1)-1))'",
+    "test": "npm run build && node --test",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -34,5 +35,8 @@
   "bugs": {
     "url": "https://github.com/matoototo/d3-manybody-wasm/issues"
   },
-  "homepage": "https://github.com/matoototo/d3-manybody-wasm#readme"
+  "homepage": "https://github.com/matoototo/d3-manybody-wasm#readme",
+  "devDependencies": {
+    "d3-force": "^3.0.0"
+  }
 }
