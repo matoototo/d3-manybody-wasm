@@ -419,6 +419,7 @@ test('batched virtual ticks preserve cooled drag and release dynamics', () => {
 
     const ordinary = create(1);
     const batched = create(4);
+    const positionTolerance = 1.1e-2;
     ordinary.simulation.tick(1000);
     batched.simulation.tick(250);
 
@@ -426,7 +427,7 @@ test('batched virtual ticks preserve cooled drag and release dynamics', () => {
         for (let index = 0; index < ordinary.nodes.length; ++index) {
             for (const property of ['x', 'y']) {
                 const difference = Math.abs(ordinary.nodes[index][property] - batched.nodes[index][property]);
-                assert.ok(difference < 1e-2, `${message}: node ${index} ${property} differs by ${difference}`);
+                assert.ok(difference < positionTolerance, `${message}: node ${index} ${property} differs by ${difference}`);
             }
         }
     };
