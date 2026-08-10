@@ -87,6 +87,69 @@ test('collision matches D3 for variable-radius pair resolution', () => {
     disposeSimulation(actualSimulation);
 });
 
+test('many-body matches D3 when theta requires direct body evaluation', () => {
+    const source = [
+        { x: -83, y: 17, vx: 0, vy: 0, strength: -12 },
+        { x: -21, y: -54, vx: 0, vy: 0, strength: -27 },
+        { x: 13, y: 91, vx: 0, vy: 0, strength: -43 },
+        { x: 67, y: -8, vx: 0, vy: 0, strength: -61 },
+        { x: 104, y: 73, vx: 0, vy: 0, strength: -79 },
+        { x: 149, y: -96, vx: 0, vy: 0, strength: -101 }
+    ];
+    const expected = cloneNodes(source);
+    const actual = cloneNodes(source);
+    const configure = factory => factory()
+        .strength(node => node.strength)
+        .theta(1e-6);
+    const expectedSimulation = d3.forceSimulation(expected).stop()
+        .alphaDecay(0)
+        .velocityDecay(0)
+        .force('charge', configure(d3.forceManyBody));
+    const actualSimulation = d3.forceSimulation(actual).stop()
+        .alphaDecay(0)
+        .velocityDecay(0)
+        .force('charge', configure(forceManyBody));
+
+    expectedSimulation.tick(1);
+    actualSimulation.tick(1);
+    assertNodesClose(actual, expected, 2e-5, 'direct many-body');
+    disposeSimulation(expectedSimulation);
+    disposeSimulation(actualSimulation);
+});
+
+test('Barnes-Hut charge is translation invariant', () => {
+    const source = Array.from({ length: 48 }, (_, index) => ({
+        x: ((index * 47) % 211) - 100,
+        y: ((index * 83) % 197) - 90,
+        vx: 0,
+        vy: 0
+    }));
+
+    function run(offsetX, offsetY) {
+        const nodes = source.map(node => ({
+            ...node,
+            x: node.x + offsetX,
+            y: node.y + offsetY
+        }));
+        const simulation = d3.forceSimulation(nodes).stop()
+            .alphaDecay(0)
+            .velocityDecay(0)
+            .force('charge', forceManyBody().strength(-80).theta(0.9));
+        simulation.tick(1);
+        disposeSimulation(simulation);
+        return nodes;
+    }
+
+    const origin = run(0, 0);
+    const translated = run(700, -350);
+    for (let index = 0; index < origin.length; ++index) {
+        assert.ok(Math.abs(origin[index].vx - translated[index].vx) < 2e-5, `translated node ${index} vx`);
+        assert.ok(Math.abs(origin[index].vy - translated[index].vy) < 2e-5, `translated node ${index} vy`);
+        assert.ok(Math.abs(origin[index].x - (translated[index].x - 700)) < 2e-5, `translated node ${index} x`);
+        assert.ok(Math.abs(origin[index].y - (translated[index].y + 350)) < 2e-5, `translated node ${index} y`);
+    }
+});
+
 function quantile(values, probability) {
     const sorted = [...values].sort((left, right) => left - right);
     const position = (sorted.length - 1) * probability;

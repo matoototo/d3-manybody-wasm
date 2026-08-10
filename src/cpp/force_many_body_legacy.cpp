@@ -75,12 +75,19 @@ private:
         double value = 0;  // Total mass
         double x = 0, y = 0;  // Center of mass
         int firstChild = -1;  // Index of first child, or -1 if leaf node
+        int bodyIndex = -1;  // Head of coincident bodies when this is a leaf
         std::uint8_t childMask = 0;
 
         QuadtreeNode(double cx_, double cy_, double s_) : cx(cx_), cy(cy_), s(s_) {}
     };
 
     std::vector<QuadtreeNode> quadtreeNodes;
+    std::vector<int> coincidentNext;
+
+    float bodyStrength(int sortedIndex) const {
+        return strengths[sortedIndices[sortedIndex].index];
+    }
+
     void sortByMortonCode() {
         radixScratch.resize(sortedIndices.size());
         for (unsigned int shift = 0; shift < 32; shift += 8) {
@@ -125,40 +132,57 @@ private:
 
     // Insert a node into the quadtree
     void insertNode(int nodeIndex, int dataIndex) {
-        QuadtreeNode& node = quadtreeNodes[nodeIndex];
         double x = bodyData[dataIndex].x;
         double y = bodyData[dataIndex].y;
 
         // If it's a leaf node
-        if (node.firstChild < 0) {
-            if (node.value == 0) {
+        if (quadtreeNodes[nodeIndex].firstChild < 0) {
+            const int existingIndex = quadtreeNodes[nodeIndex].bodyIndex;
+            if (existingIndex < 0) {
                 // First insertion
-                node.x = x;
-                node.y = y;
-                node.value = strengths[dataIndex];
+                quadtreeNodes[nodeIndex].bodyIndex = dataIndex;
                 return;
             }
+
+            // D3 stores coincident bodies in one leaf. Subdivision cannot
+            // separate identical float coordinates and would never terminate.
+            if (bodyData[existingIndex].x == x && bodyData[existingIndex].y == y) {
+                coincidentNext[dataIndex] = existingIndex;
+                quadtreeNodes[nodeIndex].bodyIndex = dataIndex;
+                return;
+            }
+
             // Subdivide the node
             subdivideNode(nodeIndex);
+            quadtreeNodes[nodeIndex].bodyIndex = -1;
+
+            // Preserve the body that occupied the leaf before subdivision.
+            const int existingQuad = getQuadrant(
+                quadtreeNodes[nodeIndex],
+                bodyData[existingIndex].x,
+                bodyData[existingIndex].y
+            );
+            insertNode(quadtreeNodes[nodeIndex].firstChild + existingQuad, existingIndex);
         }
 
         // Determine the quadrant to insert into
-        int quadIndex = getQuadrant(node, x, y);
-        insertNode(node.firstChild + quadIndex, dataIndex);
+        const int quadIndex = getQuadrant(quadtreeNodes[nodeIndex], x, y);
+        insertNode(quadtreeNodes[nodeIndex].firstChild + quadIndex, dataIndex);
     }
 
     // Subdivide a node into four quadrants
     void subdivideNode(int nodeIndex) {
-        QuadtreeNode& node = quadtreeNodes[nodeIndex];
-        double halfSize = node.s / 2;
-        int firstChildIndex = quadtreeNodes.size();
-        node.firstChild = firstChildIndex;
+        const double cx = quadtreeNodes[nodeIndex].cx;
+        const double cy = quadtreeNodes[nodeIndex].cy;
+        const double halfSize = quadtreeNodes[nodeIndex].s / 2;
+        const int firstChildIndex = quadtreeNodes.size();
+        quadtreeNodes[nodeIndex].firstChild = firstChildIndex;
 
         // Create four children
-        quadtreeNodes.emplace_back(node.cx - halfSize, node.cy - halfSize, halfSize);  // Bottom-left
-        quadtreeNodes.emplace_back(node.cx + halfSize, node.cy - halfSize, halfSize);  // Bottom-right
-        quadtreeNodes.emplace_back(node.cx - halfSize, node.cy + halfSize, halfSize);  // Top-left
-        quadtreeNodes.emplace_back(node.cx + halfSize, node.cy + halfSize, halfSize);  // Top-right
+        quadtreeNodes.emplace_back(cx - halfSize, cy - halfSize, halfSize);  // Bottom-left
+        quadtreeNodes.emplace_back(cx + halfSize, cy - halfSize, halfSize);  // Bottom-right
+        quadtreeNodes.emplace_back(cx - halfSize, cy + halfSize, halfSize);  // Top-left
+        quadtreeNodes.emplace_back(cx + halfSize, cy + halfSize, halfSize);  // Top-right
     }
 
     // Determine the quadrant of a point (x, y) relative to node's center
@@ -171,14 +195,15 @@ private:
 
     // Build the quadtree
     void buildQuadtree(double x0, double y0, double x1, double y1) {
+        const int n = nodeCount;
         double cx = (x0 + x1) / 2;
         double cy = (y0 + y1) / 2;
         double s = std::max(x1 - x0, y1 - y0) / 2 * 1.1;
 
         quadtreeNodes.clear();
         quadtreeNodes.emplace_back(cx, cy, s);
+        coincidentNext.assign(n, -1);
 
-        int n = nodeCount;
         for (int i = 0; i < n; ++i) {
             insertNode(0, i);
         }
@@ -188,30 +213,45 @@ private:
     void propagate() {
         for (int i = quadtreeNodes.size() - 1; i >= 0; --i) {
             QuadtreeNode& node = quadtreeNodes[i];
-            if (node.firstChild < 0) continue;
+            if (node.firstChild < 0) {
+                double strengthSum = 0;
+                for (int bodyIndex = node.bodyIndex; bodyIndex >= 0; bodyIndex = coincidentNext[bodyIndex]) {
+                    strengthSum += bodyStrength(bodyIndex);
+                }
+                if (node.bodyIndex >= 0) {
+                    node.x = bodyData[node.bodyIndex].x;
+                    node.y = bodyData[node.bodyIndex].y;
+                }
+                node.value = strengthSum;
+                continue;
+            }
 
             // Combine the masses and centers of the children
-            double mass = 0, x = 0, y = 0;
+            double strengthSum = 0, weight = 0, x = 0, y = 0;
             std::uint8_t childMask = 0;
             for (int j = 0; j < 4; ++j) {
                 QuadtreeNode& child = quadtreeNodes[node.firstChild + j];
-                mass += child.value;
-                x += child.x * child.value;
-                y += child.y * child.value;
-                if (child.value != 0) childMask |= static_cast<std::uint8_t>(1u << j);
+                const double childWeight = std::abs(child.value);
+                strengthSum += child.value;
+                weight += childWeight;
+                x += child.x * childWeight;
+                y += child.y * childWeight;
+                if (child.value != 0) {
+                    childMask |= static_cast<std::uint8_t>(1u << j);
+                }
             }
 
-            if (mass > 0) {
-                node.x = x / mass;
-                node.y = y / mass;
+            if (weight > 0) {
+                node.x = x / weight;
+                node.y = y / weight;
             }
-            node.value = mass;
+            node.value = strengthSum;
             node.childMask = childMask;
         }
     }
 
     // Apply forces from the quadtree to a node
-    void apply(int nodeIndex, BodyData& body) {
+    void apply(int nodeIndex, int targetIndex, BodyData& body) {
         QuadtreeNode& quad = quadtreeNodes[nodeIndex];
 
         if (quad.value == 0) return;
@@ -223,19 +263,45 @@ private:
 
         if (w * w / theta2 < d2) {
             if (d2 < distanceMax2) {
-                if (d2 == 0) {
+                if (dx == 0) {
                     dx = (random() - 0.5) * 1e-6;
-                    dy = (random() - 0.5) * 1e-6;
-                    d2 = dx * dx + dy * dy;
+                    d2 += dx * dx;
                 }
-                if (d2 < distanceMin2) d2 = distanceMin2;
+                if (dy == 0) {
+                    dy = (random() - 0.5) * 1e-6;
+                    d2 += dy * dy;
+                }
+                if (d2 < distanceMin2) d2 = std::sqrt(distanceMin2 * d2);
                 double factor = quad.value * alpha / d2;
                 body.vx += static_cast<float>(dx * factor);
                 body.vy += static_cast<float>(dy * factor);
             }
         } else if (quad.firstChild >= 0) {
             for (int i = 0; i < 4; ++i) {
-                if (quad.childMask & (1u << i)) apply(quad.firstChild + i, body);
+                if (quad.childMask & (1u << i)) apply(quad.firstChild + i, targetIndex, body);
+            }
+        } else if (d2 < distanceMax2) {
+            // A nearby leaf failed the Barnes-Hut acceptance test, so evaluate
+            // its bodies directly instead of dropping their contribution.
+            for (int sourceIndex = quad.bodyIndex; sourceIndex >= 0; sourceIndex = coincidentNext[sourceIndex]) {
+                if (sourceIndex == targetIndex) continue;
+                double directX = bodyData[sourceIndex].x - body.x;
+                double directY = bodyData[sourceIndex].y - body.y;
+                double directD2 = directX * directX + directY * directY;
+                if (directX == 0) {
+                    directX = (random() - 0.5) * 1e-6;
+                    directD2 += directX * directX;
+                }
+                if (directY == 0) {
+                    directY = (random() - 0.5) * 1e-6;
+                    directD2 += directY * directY;
+                }
+                if (directD2 < distanceMin2) {
+                    directD2 = std::sqrt(distanceMin2 * directD2);
+                }
+                const double factor = bodyStrength(sourceIndex) * alpha / directD2;
+                body.vx += static_cast<float>(directX * factor);
+                body.vy += static_cast<float>(directY * factor);
             }
         }
     }
@@ -314,7 +380,7 @@ private:
                     if (begin >= task.force->applyEnd) break;
                     const int end = std::min(task.force->applyEnd, begin + kApplyChunkSize);
                     for (int index = begin; index < end; ++index) {
-                        task.force->apply(0, task.force->bodyData[index]);
+                        task.force->apply(0, index, task.force->bodyData[index]);
                         task.force->applyAxes(task.force->bodyData[index]);
                     }
                 }
@@ -322,7 +388,7 @@ private:
             return;
         }
         for (int index = task.begin; index < task.end; ++index) {
-            task.force->apply(0, task.force->bodyData[index]);
+            task.force->apply(0, index, task.force->bodyData[index]);
             task.force->applyAxes(task.force->bodyData[index]);
         }
     }
@@ -367,7 +433,7 @@ private:
         prepareWorkers();
         if (activeWorkerCount == 0) {
             for (int index = 0; index < n; ++index) {
-                apply(0, bodyData[index]);
+                apply(0, index, bodyData[index]);
                 applyAxes(bodyData[index]);
             }
         } else {
@@ -392,7 +458,7 @@ private:
         }
 #else
         for (int index = 0; index < n; ++index) {
-            apply(0, bodyData[index]);
+            apply(0, index, bodyData[index]);
             applyAxes(bodyData[index]);
         }
 #endif
