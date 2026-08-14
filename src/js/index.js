@@ -606,32 +606,37 @@ function createForceLink(initialLinks = []) {
         const nodeById = new Map(nodesRef.map((node, index) => [idAccessor(node, index, nodesRef), node]));
         counts = new Array(nodeCount).fill(0);
 
-        for (let index = 0; index < linksRef.length; ++index) {
-            const link = linksRef[index];
-            link.index = index;
-            if (typeof link.source !== 'object') link.source = nodeById.get(link.source);
-            if (typeof link.target !== 'object') link.target = nodeById.get(link.target);
-            if (!link.source) throw new Error(`node not found: ${link.source}`);
-            if (!link.target) throw new Error(`node not found: ${link.target}`);
-            counts[link.source.index] += 1;
-            counts[link.target.index] += 1;
+        // Callers like force-graph re-initialize against a new node array before
+        // re-seeding links, so links pointing outside nodesRef are transient:
+        // skip them here and let the .links() call that follows re-resolve.
+        const resolved = [];
+        for (const link of linksRef) {
+            const source = typeof link.source === 'object' ? link.source : nodeById.get(link.source);
+            const target = typeof link.target === 'object' ? link.target : nodeById.get(link.target);
+            if (!source || !target || nodesRef[source.index] !== source || nodesRef[target.index] !== target) continue;
+            link.source = source;
+            link.target = target;
+            link.index = resolved.length;
+            resolved.push(link);
+            counts[source.index] += 1;
+            counts[target.index] += 1;
         }
 
-        const sources = new Int32Array(linksRef.length);
-        const targets = new Int32Array(linksRef.length);
-        const biases = new Float64Array(linksRef.length);
-        const strengths = new Float64Array(linksRef.length);
-        const distances = new Float64Array(linksRef.length);
+        const sources = new Int32Array(resolved.length);
+        const targets = new Int32Array(resolved.length);
+        const biases = new Float64Array(resolved.length);
+        const strengths = new Float64Array(resolved.length);
+        const distances = new Float64Array(resolved.length);
         const getStrength = strengthAccessor || defaultStrength;
-        for (let index = 0; index < linksRef.length; ++index) {
-            const link = linksRef[index];
+        for (let index = 0; index < resolved.length; ++index) {
+            const link = resolved[index];
             const sourceCount = counts[link.source.index];
             const targetCount = counts[link.target.index];
             sources[index] = link.source.index;
             targets[index] = link.target.index;
             biases[index] = sourceCount / (sourceCount + targetCount);
-            strengths[index] = Number(getStrength(link, index, linksRef));
-            distances[index] = Number(distanceAccessor(link, index, linksRef));
+            strengths[index] = Number(getStrength(link, index, resolved));
+            distances[index] = Number(distanceAccessor(link, index, resolved));
         }
         force.setLinks(sources, targets, biases, strengths, distances);
     }
