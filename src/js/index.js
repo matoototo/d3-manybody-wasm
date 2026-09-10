@@ -211,6 +211,7 @@ function createAxisForce(createForceFunc, coordinateName) {
             releaseBuffer();
             nodesRef = null;
             nodeCount = 0;
+            force.delete();
         };
 
         forceWrapper.strength = function (_) {
@@ -349,6 +350,7 @@ function createForceManyBody(createNativeForce) {
         releaseBuffer();
         nodesRef = null;
         nodeCount = 0;
+        force.delete();
     };
 
     forceWrapper.strength = function (_) {
@@ -504,6 +506,7 @@ function createForceCollide() {
         releaseBuffer();
         nodesRef = null;
         nodeCount = 0;
+        force.delete();
     };
 
     forceWrapper.radius = function (_) {
@@ -733,6 +736,7 @@ function createForceLink(initialLinks = []) {
         releaseBuffer();
         nodesRef = null;
         nodeCount = 0;
+        force.delete();
     };
 
     forceWrapper.links = function (_) {
